@@ -43,3 +43,32 @@ export function parseDuration(input) {
 
   return total;
 }
+
+const SORTED_UNITS = ['d', 'h', 'm', 's', 'ms'];
+
+export function formatDuration(ms) {
+  if (typeof ms !== 'number') {
+    throw new TypeError('Expected a number');
+  }
+
+  if (!Number.isSafeInteger(ms) || ms < 0) {
+    throw new RangeError('Expected a safe positive integer');
+  }
+
+  if (ms === 0) {
+    return '0ms';
+  }
+
+  const parts = [];
+  let remaining = ms;
+
+  for (const unit of SORTED_UNITS) {
+    const value = Math.floor(remaining / UNIT_MS[unit]);
+    if (value > 0) {
+      parts.push(`${value}${unit}`);
+      remaining -= value * UNIT_MS[unit];
+    }
+  }
+
+  return parts.join(' ');
+}

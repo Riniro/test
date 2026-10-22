@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDuration } from '../src/duration.js';
+import { parseDuration, formatDuration } from '../src/duration.js';
 
 // --- each unit ---
 test('1ms → 1', () => { assert.strictEqual(parseDuration('1ms'), 1); });
@@ -70,4 +70,98 @@ test('-5s (negative) → RangeError', () => {
 });
 test('10 S (wrong case) → RangeError', () => {
   assert.throws(() => parseDuration('10 S'), RangeError);
+});
+
+// --- formatDuration: basic decomposition ---
+test('formatDuration(5400000) === "1h 30m"', () => {
+  assert.strictEqual(formatDuration(5_400_000), '1h 30m');
+});
+
+test('formatDuration(90061001) === "1d 1h 1m 1s 1ms"', () => {
+  assert.strictEqual(formatDuration(90_061_001), '1d 1h 1m 1s 1ms');
+});
+
+test('formatDuration(3661000) === "1h 1m 1s"', () => {
+  assert.strictEqual(formatDuration(3_661_000), '1h 1m 1s');
+});
+
+// --- formatDuration: zero ---
+test('formatDuration(0) === "0ms"', () => {
+  assert.strictEqual(formatDuration(0), '0ms');
+});
+
+test('formatDuration(-0) === "0ms"', () => {
+  assert.strictEqual(formatDuration(-0), '0ms');
+});
+
+// --- formatDuration: TypeError for non-number ---
+test('formatDuration("100") throws TypeError', () => {
+  assert.throws(() => formatDuration('100'), TypeError);
+});
+
+test('formatDuration(null) throws TypeError', () => {
+  assert.throws(() => formatDuration(null), TypeError);
+});
+
+test('formatDuration(undefined) throws TypeError', () => {
+  assert.throws(() => formatDuration(undefined), TypeError);
+});
+
+test('formatDuration({}) throws TypeError', () => {
+  assert.throws(() => formatDuration({}), TypeError);
+});
+
+test('formatDuration(BigInt(100)) throws TypeError', () => {
+  assert.throws(() => formatDuration(BigInt(100)), TypeError);
+});
+
+// --- formatDuration: RangeError for invalid numbers ---
+test('formatDuration(-1) throws RangeError', () => {
+  assert.throws(() => formatDuration(-1), RangeError);
+});
+
+test('formatDuration(1.5) throws RangeError', () => {
+  assert.throws(() => formatDuration(1.5), RangeError);
+});
+
+test('formatDuration(NaN) throws RangeError', () => {
+  assert.throws(() => formatDuration(NaN), RangeError);
+});
+
+test('formatDuration(Infinity) throws RangeError', () => {
+  assert.throws(() => formatDuration(Infinity), RangeError);
+});
+
+test('formatDuration(-Infinity) throws RangeError', () => {
+  assert.throws(() => formatDuration(-Infinity), RangeError);
+});
+
+test('formatDuration(Number.MAX_SAFE_INTEGER + 1) throws RangeError', () => {
+  assert.throws(() => formatDuration(Number.MAX_SAFE_INTEGER + 1), RangeError);
+});
+
+// --- formatDuration: MAX_SAFE_INTEGER is accepted ---
+test('formatDuration(Number.MAX_SAFE_INTEGER) succeeds', () => {
+  const result = formatDuration(Number.MAX_SAFE_INTEGER);
+  assert(typeof result === 'string');
+});
+
+// --- formatDuration: round-trip ---
+test('parseDuration(formatDuration(0)) === 0', () => {
+  assert.strictEqual(parseDuration(formatDuration(0)), 0);
+});
+
+test('parseDuration(formatDuration(1)) === 1', () => {
+  assert.strictEqual(parseDuration(formatDuration(1)), 1);
+});
+
+test('parseDuration(formatDuration(5400000)) === 5400000', () => {
+  assert.strictEqual(parseDuration(formatDuration(5_400_000)), 5_400_000);
+});
+
+test('parseDuration(formatDuration(Number.MAX_SAFE_INTEGER)) === Number.MAX_SAFE_INTEGER', () => {
+  assert.strictEqual(
+    parseDuration(formatDuration(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
 });
