@@ -228,8 +228,8 @@ test('start acquires lock and writes journal (non-blocking with nohup)', (t) => 
   try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch { /* */ }
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `const rc = main({ argv: ['start', '--', 'node', '-e', 'process.exit(0)'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `const rc = main({ argv: ['start', '--', 'node', '-e', 'process.exit(0)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + rc);`,
     `process.exit(rc);`,
   ].join('\n'));
@@ -393,8 +393,8 @@ test('recover with dead owner process shows reasons', (t) => {
   fs.writeFileSync(ownerPath, JSON.stringify(owner));
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `const rc = main({ argv: ['recover'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `const rc = main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + rc);`,
     `process.exit(rc);`,
   ].join('\n'));
@@ -402,6 +402,8 @@ test('recover with dead owner process shows reasons', (t) => {
   const result = spawnSync(process.execPath, [scriptPath], {
     cwd: process.cwd(),
     encoding: 'utf8',
+    // Disable ANSI color codes in spawned child so assertions are reliable
+    env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
     timeout: 10000,
   });
 
@@ -469,8 +471,8 @@ test('start propagates child exit code', (t) => {
   try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch { /* */ }
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `main({ argv: ['start', '--', 'node', '-e', 'process.exit(42)'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `main({ argv: ['start', '--', 'node', '-e', 'process.exit(42)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
   ].join('\n'));
 
   const result = spawnSync(process.execPath, [scriptPath], {
@@ -496,8 +498,8 @@ test('status output does not contain token', (t) => {
   assert.equal(acq.ok, true);
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `const out = main({ argv: ['status'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `const out = main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 
@@ -524,8 +526,8 @@ test('recover output does not contain token', (t) => {
   assert.equal(acq.ok, true);
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `const out = main({ argv: ['recover'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `const out = main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 
@@ -631,8 +633,8 @@ test('status with valid journal shows stage and updatedAt', (t) => {
   writeJournal({ stateDir, repoKey, patch: { stage: 'execution', issueKey: 'KAN-6' } });
 
   const scriptPath = spawnCliScript(stateDir, [
-    `process.env.COOORDINATOR_STATE_DIR = '${stateDir}';`,
-    `const out = main({ argv: ['status'], cwd: '${process.cwd()}' });`,
+    `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
+    `const out = main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 
