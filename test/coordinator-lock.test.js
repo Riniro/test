@@ -292,6 +292,40 @@ test('release NOT_OWNER does not delete lock dir', async () => {
   assert.equal(s.held, true);
 });
 
+// ------------------------------------------------------------------
+// KAN-6-A2: extra meta keys must NOT appear in owner.json
+// ------------------------------------------------------------------
+test('extra meta keys are not written to owner.json', async () => {
+  const repoKey = 'no-extra-keys';
+  const r = acquire({ stateDir, repoKey, meta: { secretValue: 's3cret', extra: 42, worktree: '/wkt/extra' } });
+  assert.equal(r.ok, true);
+
+  const ownerPath = path.join(stateDir, repoKey, 'lock', 'owner.json');
+  const owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
+  const keys = Object.keys(owner);
+
+  // secretValue and extra must NOT be present
+  assert.ok(!keys.includes('secretValue'), 'secretValue should not be in owner.json');
+  assert.ok(!keys.includes('extra'), 'extra should not be in owner.json');
+
+  // Only the standard 7 keys should remain
+  assert.deepStrictEqual(keys.sort(), VALID_KEYS);
+});
+
+// ------------------------------------------------------------------
+// KAN-6-A2: acquire without meta gives owner.worktree === null
+// ------------------------------------------------------------------
+test('acquire without meta gives owner.worktree === null', async () => {
+  const repoKey = 'no-meta-worktree';
+  const r = acquire({ stateDir, repoKey });
+  assert.equal(r.ok, true);
+  assert.equal(r.owner.worktree, null);
+
+  const ownerPath = path.join(stateDir, repoKey, 'lock', 'owner.json');
+  const owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
+  assert.equal(owner.worktree, null);
+});
+
 after(() => {
   try {
     if (fs.existsSync(stateDir)) {

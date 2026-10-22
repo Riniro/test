@@ -69,13 +69,8 @@ function acquire({ stateDir, repoKey, meta }) {
     repoKey,
     acquiredAt: now,
     heartbeatAt: now,
+    worktree: meta?.worktree ?? null,
   };
-
-  if (meta && typeof meta === 'object') {
-    for (const key of Object.keys(meta)) {
-      owner[key] = meta[key];
-    }
-  }
 
   writeOwnerAtomic(lockPath, owner);
 
