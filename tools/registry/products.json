@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "products": [
+    {
+      "productId": "prd-test",
+      "name": "Test",
+      "label": "project-test",
+      "repo": "Riniro/test",
+      "baseBranch": "master",
+      "docsPath": "docs/architecture"
+    }
+  ]
+}
