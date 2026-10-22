@@ -45,11 +45,11 @@ function spawnCliScript(stateDir, scriptBody) {
 // ------------------------------------------------------------------
 // 21. status — нет блокировки: locked: false, journal: MISSING
 // ------------------------------------------------------------------
-test('status with no lock shows locked: false and journal: MISSING', (t) => {
+test('status with no lock shows locked: false and journal: MISSING', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['status'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -60,14 +60,14 @@ test('status with no lock shows locked: false and journal: MISSING', (t) => {
 // ------------------------------------------------------------------
 // 22. status — блокировка есть, журнал отсутствует: locked: true, journal: MISSING
 // ------------------------------------------------------------------
-test('status with lock but no journal shows locked: true and journal: MISSING', (t) => {
+test('status with lock but no journal shows locked: true and journal: MISSING', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   acquire({ stateDir, repoKey, meta: { worktree: null } });
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['status'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -78,11 +78,11 @@ test('status with lock but no journal shows locked: true and journal: MISSING', 
 // ------------------------------------------------------------------
 // 23. release без --token: Usage error (exit 1)
 // ------------------------------------------------------------------
-test('release without --token returns exit 1', (t) => {
+test('release without --token returns exit 1', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['release'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -93,7 +93,7 @@ test('release without --token returns exit 1', (t) => {
 // ------------------------------------------------------------------
 // 24. release — правильный токен: lock снимается
 // ------------------------------------------------------------------
-test('release with correct token releases the lock', (t) => {
+test('release with correct token releases the lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -101,7 +101,7 @@ test('release with correct token releases the lock', (t) => {
   const acq = acquire({ stateDir, repoKey, meta: {} });
   assert.equal(acq.ok, true);
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['release', '--token', acq.token],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -115,7 +115,7 @@ test('release with correct token releases the lock', (t) => {
 // ------------------------------------------------------------------
 // 25. release — чужой токен: NOT_OWNER (exit 11)
 // ------------------------------------------------------------------
-test('release with wrong token returns NOT_OWNER exit 11', (t) => {
+test('release with wrong token returns NOT_OWNER exit 11', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -123,7 +123,7 @@ test('release with wrong token returns NOT_OWNER exit 11', (t) => {
   const acq = acquire({ stateDir, repoKey, meta: {} });
   assert.equal(acq.ok, true);
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['release', '--token', 'wrong-token'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -137,11 +137,11 @@ test('release with wrong token returns NOT_OWNER exit 11', (t) => {
 // ------------------------------------------------------------------
 // 26. release — неактивная блокировка: NOT_HELD (exit 0)
 // ------------------------------------------------------------------
-test('release on non-existent lock returns NOT_HELD exit 0', (t) => {
+test('release on non-existent lock returns NOT_HELD exit 0', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['release', '--token', 'any-token'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -152,11 +152,11 @@ test('release on non-existent lock returns NOT_HELD exit 0', (t) => {
 // ------------------------------------------------------------------
 // 27. force-release без --confirm: CONFIRMATION_REQUIRED (exit 12)
 // ------------------------------------------------------------------
-test('force-release without --confirm returns exit 12', (t) => {
+test('force-release without --confirm returns exit 12', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['force-release', '--reason', 'test'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -167,7 +167,7 @@ test('force-release without --confirm returns exit 12', (t) => {
 // ------------------------------------------------------------------
 // 28. force-release с --confirm и --reason: lock снимается
 // ------------------------------------------------------------------
-test('force-release with --confirm and --reason releases lock', (t) => {
+test('force-release with --confirm and --reason releases lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -175,7 +175,7 @@ test('force-release with --confirm and --reason releases lock', (t) => {
   const acq = acquire({ stateDir, repoKey, meta: {} });
   assert.equal(acq.ok, true);
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['force-release', '--confirm', '--reason', 'cleanup'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -189,11 +189,11 @@ test('force-release with --confirm and --reason releases lock', (t) => {
 // ------------------------------------------------------------------
 // 29. force-release — нет блокировки: exit 0 (graceful no-op)
 // ------------------------------------------------------------------
-test('force-release on non-existent lock returns exit 0', (t) => {
+test('force-release on non-existent lock returns exit 0', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['force-release', '--confirm', '--reason', 'test'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -204,11 +204,11 @@ test('force-release on non-existent lock returns exit 0', (t) => {
 // ------------------------------------------------------------------
 // 30. start без команды: Usage (exit 2)
 // ------------------------------------------------------------------
-test('start without child command returns exit 2', (t) => {
+test('start without child command returns exit 2', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['start'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -219,7 +219,7 @@ test('start without child command returns exit 2', (t) => {
 // ------------------------------------------------------------------
 // 31. start — успешная блокировка: journal обновлён, exit 0
 // ------------------------------------------------------------------
-test('start acquires lock and writes journal (non-blocking with nohup)', (t) => {
+test('start acquires lock and writes journal (non-blocking with nohup)', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -229,7 +229,7 @@ test('start acquires lock and writes journal (non-blocking with nohup)', (t) => 
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const rc = main({ argv: ['start', '--', 'node', '-e', 'process.exit(0)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const rc = await main({ argv: ['start', '--', 'node', '-e', 'process.exit(0)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + rc);`,
     `process.exit(rc);`,
   ].join('\n'));
@@ -247,7 +247,7 @@ test('start acquires lock and writes journal (non-blocking with nohup)', (t) => 
   assert.equal(Number(exitCodeMatch[1]), 0, 'main() exit code should be 0');
 
   const lockSt = status({ stateDir, repoKey });
-  assert.ok(lockSt.held, 'lock should be held');
+  assert.ok(!lockSt.held, 'lock must be released once the child has exited');
 
   const jr = readJournal({ stateDir, repoKey });
   assert.ok(jr.ok, 'journal should be valid');
@@ -257,7 +257,7 @@ test('start acquires lock and writes journal (non-blocking with nohup)', (t) => 
 // ------------------------------------------------------------------
 // 32. start — повторно BUSY: exit 9
 // ------------------------------------------------------------------
-test('start when lock already held returns BUSY exit 9', (t) => {
+test('start when lock already held returns BUSY exit 9', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -265,7 +265,7 @@ test('start when lock already held returns BUSY exit 9', (t) => {
   // Seed a lock (acquire in this test process — it will be held)
   acquire({ stateDir, repoKey, meta: {} });
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -276,11 +276,11 @@ test('start when lock already held returns BUSY exit 9', (t) => {
 // ------------------------------------------------------------------
 // 33. recover — нет блокировки: SAFE_TO_RELEASE (exit 0)
 // ------------------------------------------------------------------
-test('recover with no lock shows SAFE_TO_RELEASE exit 0', (t) => {
+test('recover with no lock shows SAFE_TO_RELEASE exit 0', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['recover'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -302,7 +302,7 @@ test('resolveStateDir returns env var or default path', () => {
 // ------------------------------------------------------------------
 // 35. status с повреждённым журналом: exit 10
 // ------------------------------------------------------------------
-test('status with corrupt journal returns exit 10', (t) => {
+test('status with corrupt journal returns exit 10', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -312,7 +312,7 @@ test('status with corrupt journal returns exit 10', (t) => {
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
   fs.writeFileSync(journalPath, '{not valid json');
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['status'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -323,7 +323,7 @@ test('status with corrupt journal returns exit 10', (t) => {
 // ------------------------------------------------------------------
 // 36. status — журнал CHECKSUM_MISMATCH: exit 10
 // ------------------------------------------------------------------
-test('status with checksum mismatch returns exit 10', (t) => {
+test('status with checksum mismatch returns exit 10', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -348,7 +348,7 @@ test('status with checksum mismatch returns exit 10', (t) => {
   };
   fs.writeFileSync(journalPath, JSON.stringify(record));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['status'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -360,14 +360,14 @@ test('status with checksum mismatch returns exit 10', (t) => {
 // 37. start — acquire failure: exit 1 (not BUSY)
 //         Since lock 'start-repo' is still held, this should return BUSY (9).
 // ------------------------------------------------------------------
-test('start when lock held returns BUSY exit 9', (t) => {
+test('start when lock held returns BUSY exit 9', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   acquire({ stateDir, repoKey, meta: {} });
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -378,7 +378,7 @@ test('start when lock held returns BUSY exit 9', (t) => {
 // ------------------------------------------------------------------
 // 38. recover — блокировка есть, process не жив: содержит причину
 // ------------------------------------------------------------------
-test('recover with dead owner process shows reasons', (t) => {
+test('recover with dead owner process shows reasons', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -394,7 +394,7 @@ test('recover with dead owner process shows reasons', (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const rc = main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const rc = await main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + rc);`,
     `process.exit(rc);`,
   ].join('\n'));
@@ -417,11 +417,11 @@ test('recover with dead owner process shows reasons', (t) => {
 // ------------------------------------------------------------------
 // 39. release с неактивной блокировкой возвращает 0 (NOT_HELD)
 // ------------------------------------------------------------------
-test('release of non-existent lock returns exit 0', (t) => {
+test('release of non-existent lock returns exit 0', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['release', '--token', 'non-existent'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -432,11 +432,11 @@ test('release of non-existent lock returns exit 0', (t) => {
 // ------------------------------------------------------------------
 // 40. recover — journal MISSING: всё равно SAFE_TO_RELEASE если нет блокировки
 // ------------------------------------------------------------------
-test('recover with no lock and missing journal shows SAFE_TO_RELEASE', (t) => {
+test('recover with no lock and missing journal shows SAFE_TO_RELEASE', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['recover'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -447,11 +447,11 @@ test('recover with no lock and missing journal shows SAFE_TO_RELEASE', (t) => {
 // ------------------------------------------------------------------
 // 41. main — неизвестная команда: exit 2
 // ------------------------------------------------------------------
-test('main with unknown command returns exit 2', (t) => {
+test('main with unknown command returns exit 2', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['foobar'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -462,7 +462,7 @@ test('main with unknown command returns exit 2', (t) => {
 // ------------------------------------------------------------------
 // 42. start — child exit code = exit code из CLI
 // ------------------------------------------------------------------
-test('start propagates child exit code', (t) => {
+test('start propagates child exit code', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -472,7 +472,8 @@ test('start propagates child exit code', (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `main({ argv: ['start', '--', 'node', '-e', 'process.exit(42)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const rc = await main({ argv: ['start', '--', 'node', '-e', 'process.exit(42)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `process.exit(rc);`,
   ].join('\n'));
 
   const result = spawnSync(process.execPath, [scriptPath], {
@@ -489,7 +490,7 @@ test('start propagates child exit code', (t) => {
 // ------------------------------------------------------------------
 // 43. token never appears in status output
 // ------------------------------------------------------------------
-test('status output does not contain token', (t) => {
+test('status output does not contain token', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -499,7 +500,7 @@ test('status output does not contain token', (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const out = main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const out = await main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 
@@ -517,7 +518,7 @@ test('status output does not contain token', (t) => {
 // ------------------------------------------------------------------
 // 44. recover output does not contain token
 // ------------------------------------------------------------------
-test('recover output does not contain token', (t) => {
+test('recover output does not contain token', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -527,7 +528,7 @@ test('recover output does not contain token', (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const out = main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const out = await main({ argv: ['recover'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 
@@ -545,7 +546,7 @@ test('recover output does not contain token', (t) => {
 // ------------------------------------------------------------------
 // 45. start после release — можно заново захватить
 // ------------------------------------------------------------------
-test('start after release can re-acquire lock', (t) => {
+test('start after release can re-acquire lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -557,27 +558,28 @@ test('start after release can re-acquire lock', (t) => {
   const acq = acquire({ stateDir, repoKey, meta: {} });
   assert.equal(acq.ok, true);
 
-  let exitCode = main({
+  let exitCode = await main({
     argv: ['release', '--token', acq.token],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
   });
   assert.equal(exitCode, 0);
 
-  exitCode = main({
+  exitCode = await main({
     argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
   });
   assert.equal(exitCode, 0);
 
-  assert.ok(status({ stateDir, repoKey }).held);
+  // start дождался дочернего процесса и освободил блокировку за собой.
+  assert.ok(!status({ stateDir, repoKey }).held);
 });
 
 // ------------------------------------------------------------------
 // 46. force-release с пустой причиной: exit 12
 // ------------------------------------------------------------------
-test('force-release with empty reason returns exit 12', (t) => {
+test('force-release with empty reason returns exit 12', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -585,7 +587,7 @@ test('force-release with empty reason returns exit 12', (t) => {
   const acq = acquire({ stateDir, repoKey, meta: {} });
   assert.equal(acq.ok, true);
 
-  const exitCode = main({
+  const exitCode = await main({
     argv: ['force-release', '--confirm', '--reason', ''],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
@@ -599,7 +601,7 @@ test('force-release with empty reason returns exit 12', (t) => {
 // ------------------------------------------------------------------
 // 47. multiple sequential start commands: first succeeds, second BUSY
 // ------------------------------------------------------------------
-test('multiple sequential starts: first succeeds, second BUSY', (t) => {
+test('sequential starts both succeed because each releases the lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -607,25 +609,28 @@ test('multiple sequential starts: first succeeds, second BUSY', (t) => {
   const lockPath = path.join(stateDir, repoKey, 'lock');
   try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch { /* */ }
 
-  const r1 = main({
+  const r1 = await main({
     argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
   });
   assert.equal(r1, 0);
+  assert.ok(!status({ stateDir, repoKey }).held, 'первый start должен освободить блокировку');
 
-  const r2 = main({
+  const r2 = await main({
     argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
     env: { COORDINATOR_STATE_DIR: stateDir },
   });
-  assert.equal(r2, 9);
+  // Запуски последовательные, а не одновременные: второй берёт свободную блокировку.
+  // Случай BUSY при живом дочернем процессе проверяется в coordinator-cli-process.test.js.
+  assert.equal(r2, 0);
 });
 
 // ------------------------------------------------------------------
 // Дополнительно: status с журналом — показывает stage и updatedAt
 // ------------------------------------------------------------------
-test('status with valid journal shows stage and updatedAt', (t) => {
+test('status with valid journal shows stage and updatedAt', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
@@ -634,7 +639,7 @@ test('status with valid journal shows stage and updatedAt', (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const out = main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const out = await main({ argv: ['status'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
     `console.log('EXIT_CODE:' + out);`,
   ].join('\n'));
 

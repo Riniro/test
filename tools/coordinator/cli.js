@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { acquire, release, status, heartbeat, forceRelease, lockDir } from './lock.js';
 import { read as readJournal, write } from './journal.js';
@@ -150,9 +151,9 @@ function binaryAvailable(name) {
 /**
  * CLI main entry point — works both as direct script and exported function.
  * @param {{ argv: string[], cwd?: string, env?: NodeJS.ProcessEnv }} opts
- * @returns {number} exit code
+ * @returns {Promise<number>} exit code
  */
-function main({ argv, cwd, env } = {}) {
+async function main({ argv, cwd, env } = {}) {
   const myEnv = env || process.env;
 
   const { command, args } = parseArgs(argv || process.argv.slice(2));
@@ -223,29 +224,36 @@ function main({ argv, cwd, env } = {}) {
         heartbeatTimer.unref();
       } catch { /* unref not needed in some environments */ }
 
-      // Handle signals
-      function cleanup() {
-        release({ stateDir, repoKey, token });
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-        }
+      // Forward termination signals to the child; the lock is released in the
+      // finally block below once the child has actually gone away.
+      function forwardSignal() {
         if (!child.killed) {
           child.kill('SIGTERM');
         }
       }
-      process.on('SIGINT', cleanup);
-      process.on('SIGTERM', cleanup);
+      process.on('SIGINT', forwardSignal);
+      process.on('SIGTERM', forwardSignal);
 
-      child.on('exit', (code, signal) => {
-        cleanup();
-        process.off('SIGINT', cleanup);
-        process.off('SIGTERM', cleanup);
-        const rc = exitCode(code, signal);
-        process.exitCode = rc;
-        process.exit(rc);
-      });
-
-      break;
+      try {
+        // Hold the lock for the whole lifetime of the child process.
+        return await new Promise((resolve) => {
+          child.on('error', () => {
+            // Child could not be spawned at all (for example ENOENT).
+            resolve(127);
+          });
+          child.on('exit', (code, signal) => {
+            resolve(exitCode(code, signal));
+          });
+        });
+      } finally {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+        }
+        process.off('SIGINT', forwardSignal);
+        process.off('SIGTERM', forwardSignal);
+        // Releasing an already released lock reports NOT_HELD, which is fine.
+        release({ stateDir, repoKey, token });
+      }
     }
 
     case 'status': {
@@ -430,3 +438,18 @@ function determineRecovery(lockState, jr, hasOrca, hasGh) {
 }
 
 export { resolveStateDir, resolveRepoKey, main };
+
+// Entry point: run only when this file is executed directly, not when imported.
+const isDirectRun =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  main({ argv: process.argv.slice(2), cwd: process.cwd(), env: process.env })
+    .then((rc) => {
+      process.exitCode = rc;
+    })
+    .catch((err) => {
+      process.stderr.write(String(err && err.stack ? err.stack : err) + "\n");
+      process.exitCode = 1;
+    });
+}
