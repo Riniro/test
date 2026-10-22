@@ -45,6 +45,10 @@ export function loadRegistry({ filePath }) {
     return { ok: false, reason: 'CORRUPT', detail: err.message };
   }
 
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    return { ok: false, reason: 'CORRUPT' };
+  }
+
   if (typeof data.version !== 'number' || data.version !== 1) {
     return { ok: false, reason: 'UNSUPPORTED_VERSION' };
   }
@@ -59,6 +63,10 @@ export function loadRegistry({ filePath }) {
 
   for (let i = 0; i < data.products.length; i++) {
     const entry = data.products[i];
+
+    if (typeof entry !== 'object' || entry === null) {
+      return { ok: false, reason: 'INVALID_ENTRY', detail: `entry ${i}` };
+    }
 
     const keys = Object.keys(entry);
     if (keys.length !== REQUIRED_FIELDS.length || !REQUIRED_FIELDS.every(k => keys.includes(k))) {

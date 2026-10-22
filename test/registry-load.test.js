@@ -245,3 +245,154 @@ test('no products key when DUPLICATE_LABEL', () => {
     assert.strictEqual(Object.hasOwn(res, 'products'), false);
   } finally { cleanup(dir); }
 });
+
+// -- 16.  malformed root (non-object) ----------------------------------
+
+test('CORRUPT when root is null', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
+  try {
+    const filePath = path.join(dir, 'products.json');
+    fs.writeFileSync(filePath, 'null', 'utf8');
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'CORRUPT');
+      assert.ok(res.detail === undefined || typeof res.detail === 'string');
+    });
+  } finally { cleanup(dir); }
+});
+
+test('CORRUPT when root is array', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
+  try {
+    const filePath = path.join(dir, 'products.json');
+    fs.writeFileSync(filePath, '[]', 'utf8');
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'CORRUPT');
+    });
+  } finally { cleanup(dir); }
+});
+
+test('CORRUPT when root is string', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
+  try {
+    const filePath = path.join(dir, 'products.json');
+    fs.writeFileSync(filePath, '"hello"', 'utf8');
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'CORRUPT');
+    });
+  } finally { cleanup(dir); }
+});
+
+test('CORRUPT when root is number', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
+  try {
+    const filePath = path.join(dir, 'products.json');
+    fs.writeFileSync(filePath, '42', 'utf8');
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'CORRUPT');
+    });
+  } finally { cleanup(dir); }
+});
+
+test('CORRUPT when root is boolean', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-test-'));
+  try {
+    const filePath = path.join(dir, 'products.json');
+    fs.writeFileSync(filePath, 'true', 'utf8');
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'CORRUPT');
+    });
+  } finally { cleanup(dir); }
+});
+
+// -- 17.  non-object entries in products array -------------------------
+
+test('INVALID_ENTRY when product entry is null', () => {
+  const { dir, filePath } = tmpRegistry({ version: 1, products: [null] });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 0'));
+    });
+  } finally { cleanup(dir); }
+});
+
+test('INVALID_ENTRY when product entry is array', () => {
+  const { dir, filePath } = tmpRegistry({ version: 1, products: [[]] });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 0'));
+    });
+  } finally { cleanup(dir); }
+});
+
+test('INVALID_ENTRY when product entry is string', () => {
+  const { dir, filePath } = tmpRegistry({ version: 1, products: ['bad'] });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 0'));
+    });
+  } finally { cleanup(dir); }
+});
+
+test('INVALID_ENTRY when product entry is number', () => {
+  const { dir, filePath } = tmpRegistry({ version: 1, products: [42] });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 0'));
+    });
+  } finally { cleanup(dir); }
+});
+
+test('INVALID_ENTRY when product entry is boolean', () => {
+  const { dir, filePath } = tmpRegistry({ version: 1, products: [true] });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 0'));
+    });
+  } finally { cleanup(dir); }
+});
+
+// -- 18.  mixed-index tests --------------------------------------------
+
+test('INVALID_ENTRY with correct index for non-object entry at position 2', () => {
+  const { dir, filePath } = tmpRegistry({
+    version: 1,
+    products: [
+      { productId: 'a', name: 'n', label: 'project-a', repo: 'org/repo', baseBranch: 'main', docsPath: 'docs' },
+      { productId: 'b', name: 'n', label: 'project-b', repo: 'org/repo', baseBranch: 'main', docsPath: 'docs' },
+      null,
+    ],
+  });
+  try {
+    assert.doesNotThrow(() => {
+      const res = loadRegistry({ filePath });
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.reason, 'INVALID_ENTRY');
+      assert.ok(res.detail.includes('entry 2'));
+    });
+  } finally { cleanup(dir); }
+});
