@@ -241,6 +241,60 @@ test('journal does not contain process.env or extra patch keys', () => {
 });
 
 // ------------------------------------------------------------------
+// KAN-6-B2: checksum: null → CHECKSUM_MISMATCH
+// ------------------------------------------------------------------
+test('valid journal with checksum set to null in file returns CHECKSUM_MISMATCH', () => {
+  const repoKey = 'null-checksum';
+  const filePath = journalPath({ stateDir, repoKey });
+
+  // Write valid journal
+  const w = write({ stateDir, repoKey, patch: { issueKey: 'KAN-6', stage: 'planning' } });
+  assert.equal(w.ok, true);
+
+  // Read file, replace checksum with null, write back
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const record = JSON.parse(raw);
+  record.checksum = null;
+  fs.writeFileSync(filePath, JSON.stringify(record));
+
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'CHECKSUM_MISMATCH');
+});
+
+// ------------------------------------------------------------------
+// KAN-6-B2: corrupted checksum=null in journal does not overwrite bak
+// ------------------------------------------------------------------
+test('null checksum in journal does not overwrite backup', () => {
+  const repoKey = 'null-checksum-bak';
+
+  // First write
+  const w1 = write({ stateDir, repoKey, patch: { issueKey: 'A', stage: 's1' } });
+  assert.equal(w1.ok, true);
+
+  // Second write — creates backup
+  const w2 = write({ stateDir, repoKey, patch: { issueKey: 'B', stage: 's2' } });
+  assert.equal(w2.ok, true);
+
+  // Read backup content before corruption
+  const bakBefore = JSON.parse(fs.readFileSync(backupPath({ stateDir, repoKey }), 'utf8'));
+
+  // Corrupt journal.json: set checksum to null
+  const filePath = journalPath({ stateDir, repoKey });
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const record = JSON.parse(raw);
+  record.checksum = null;
+  fs.writeFileSync(filePath, JSON.stringify(record));
+
+  // Third write — should NOT overwrite backup
+  const w3 = write({ stateDir, repoKey, patch: { issueKey: 'C', stage: 's3' } });
+  assert.equal(w3.ok, true);
+
+  const bakAfter = JSON.parse(fs.readFileSync(backupPath({ stateDir, repoKey }), 'utf8'));
+  assert.deepStrictEqual(bakAfter, bakBefore); // backup unchanged
+});
+
+// ------------------------------------------------------------------
 // Дополнительно: write без patch
 // ------------------------------------------------------------------
 test('write without patch creates record with defaults', () => {

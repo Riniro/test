@@ -93,12 +93,10 @@ function _readRecord(filePath) {
 }
 
 function _validateRecord(record) {
-  // Check checksum if present
-  if (record.checksum != null) {
-    const expected = checksumOf(record);
-    if (record.checksum !== expected) {
-      return { ok: false, reason: 'CHECKSUM_MISMATCH' };
-    }
+  // Always validate checksum
+  const expected = checksumOf(record);
+  if (record.checksum !== expected) {
+    return { ok: false, reason: 'CHECKSUM_MISMATCH' };
   }
 
   // Check required fields
@@ -225,12 +223,10 @@ function read({ stateDir, repoKey }) {
     }
   }
 
-  // Validate checksum
-  if (record.checksum != null) {
-    const expected = checksumOf(record);
-    if (record.checksum !== expected) {
-      return { ok: false, reason: 'CHECKSUM_MISMATCH' };
-    }
+  // Validate checksum always
+  const expected = checksumOf(record);
+  if (record.checksum !== expected) {
+    return { ok: false, reason: 'CHECKSUM_MISMATCH' };
   }
 
   return { ok: true, record };
