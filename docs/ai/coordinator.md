@@ -4,6 +4,9 @@
 Роли — [../../CLAUDE.md](../../CLAUDE.md), Jira — [jira-workflow.md](jira-workflow.md).
 
 ## 0. Подготовка
+Координатор запускается через защищённую команду, удерживающую блокировку репозитория, чтобы на одном
+хосте не работали два координатора сразу — см. [coordinator-runtime.md](coordinator-runtime.md).
+
 1. `orca skills get orchestration --full` — загрузить актуальный orchestration guide.
 2. `git branch --show-current`, `git status --short`. Грязное дерево → стоп и сообщение человеку.
 3. Зафиксировать **Run ID** для журнала в Jira.
@@ -14,7 +17,10 @@
 
 ## 2. Забрать в работу (claim)
 6. Перечитать задачу по `key`, сверить ключ и наличие `ai-ready`.
-7. Атомарно: снять `ai-ready` + перевести в Brief (`10007`, transition `41`).
+7. Claim выполняется **двумя последовательными шагами с проверкой каждого**
+   (правило 2 в [jira-workflow.md](jira-workflow.md)): `editJiraIssue` снимает `ai-ready`, сохраняя
+   чужие метки, затем `transitionJiraIssue` переводит в Brief (`10007`, transition `41`).
+   Атомарности между шагами нет, и Jira её не предоставляет.
    Если `ai-ready` уже снята кем-то — задача занята, run завершается.
 
 ## 3. Бриф
