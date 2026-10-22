@@ -1,4 +1,4 @@
-const PROJECT_LABEL_RE = /^project-/;
+const PROJECT_LABEL_RE = /^project-/i;
 
 function route({ labels, products }) {
   if (!Array.isArray(labels)) {

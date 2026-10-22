@@ -253,3 +253,46 @@ test('module produces no console output', () => {
     console.error = origErr;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Acceptance 6-10: case-insensitive project label detection (KAN-7-B2)
+// ---------------------------------------------------------------------------
+
+test('["Project-TEST"] with registry "project-test" → ROUTED', () => {
+  const products = [
+    { productId: 't', name: 'Test', label: 'project-test', repo: 'org/repo', baseBranch: 'main', docsPath: 'docs' },
+  ];
+  const result = route({ labels: ['Project-TEST'], products });
+  assert.strictEqual(result.status, 'ROUTED');
+  assert.strictEqual(result.product, products[0]);
+});
+
+test('["project-test","Project-TEST"] → ROUTED, not AMBIGUOUS', () => {
+  const products = [
+    { productId: 't', name: 'Test', label: 'project-test', repo: 'org/repo', baseBranch: 'main', docsPath: 'docs' },
+  ];
+  const result = route({ labels: ['project-test', 'Project-TEST'], products });
+  assert.strictEqual(result.status, 'ROUTED');
+  assert.strictEqual(result.product, products[0]);
+  assert.strictEqual(result.projectLabels, undefined);
+});
+
+test('["PROJECT-unknown"] → NEEDS_REGISTRATION with original casing', () => {
+  const result = route({ labels: ['PROJECT-unknown'], products: [] });
+  assert.strictEqual(result.status, 'NEEDS_REGISTRATION');
+  assert.strictEqual(result.label, 'PROJECT-unknown');
+});
+
+test('["Project-alpha","project-beta"] → AMBIGUOUS with original casings', () => {
+  const result = route({ labels: ['Project-alpha', 'project-beta'], products: [] });
+  assert.strictEqual(result.status, 'AMBIGUOUS');
+  assert.deepStrictEqual(result.projectLabels, ['Project-alpha', 'project-beta']);
+});
+
+test('service labels like "ai-ready" are still ignored regardless of case', () => {
+  const products = [
+    { productId: 'a', name: 'Alpha', label: 'project-alpha', repo: 'org/repo', baseBranch: 'main', docsPath: 'docs' },
+  ];
+  const result = route({ labels: ['ai-ready', 'AI-READY'], products });
+  assert.deepStrictEqual(result, { status: 'NEEDS_INPUT' });
+});
