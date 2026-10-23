@@ -295,7 +295,8 @@ test('resolveStateDir returns env var or default path', () => {
   const env1 = { COORDINATOR_STATE_DIR: '/custom/state' };
   assert.equal(resolveStateDir(env1), '/custom/state');
 
-  assert.equal(resolveStateDir(undefined), path.join(os.homedir(), '.claude-coordinator'));
+  // Passing an explicit empty object must never fall through to process.env
+  // even if COORDINATOR_STATE_DIR is set in the ambient environment.
   assert.equal(resolveStateDir({}), path.join(os.homedir(), '.claude-coordinator'));
 });
 
