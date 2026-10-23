@@ -34,6 +34,7 @@ Claude Opus — **единственный** Tech Lead, архитектор, к
 | Jira: статусы, переходы, метки | [docs/ai/jira-workflow.md](docs/ai/jira-workflow.md) |
 | Сбои, зависания, восстановление | [docs/ai/recovery.md](docs/ai/recovery.md) |
 | Защищённый запуск, блокировка, журнал прогресса | [docs/ai/coordinator-runtime.md](docs/ai/coordinator-runtime.md) |
+| Реестр продуктов и маршрутизация по меткам | [docs/architecture/product-registry.md](docs/architecture/product-registry.md) |
 | Текущая архитектура | [docs/architecture/overview.md](docs/architecture/overview.md) |
 | Границы и слои | [docs/architecture/boundaries.md](docs/architecture/boundaries.md) |
 | Гейты качества | [docs/architecture/quality-gates.md](docs/architecture/quality-gates.md) |
