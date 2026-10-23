@@ -237,6 +237,39 @@ describe('searchByLabels', () => {
     assert.strictEqual(result.length, 0);
   });
 
+  it('calls /rest/api/2/search/jql with correct JQL', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = { issues: [] };
+    let lastUrl = null;
+    let lastOpts = null;
+    const fetchImpl = (url, init) => {
+      lastUrl = url;
+      lastOpts = init;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+    };
+
+    await searchByLabels({ creds, labels: ['bug', 'urgent'], project: 'KAN', fetchImpl });
+
+    assert.ok(lastUrl);
+    assert.ok(lastUrl.includes('/rest/api/2/search/jql'), `URL should contain /rest/api/2/search/jql, got: ${lastUrl}`);
+    const urlParams = new URLSearchParams(new URL(lastUrl).search);
+    const jql = urlParams.get('jql');
+    assert.ok(jql);
+    assert.ok(jql.includes('project = "KAN"'), `JQL should contain project KAN: ${jql}`);
+    assert.ok(jql.includes('"bug"') && jql.includes('"urgent"'), `JQL should contain all labels: ${jql}`);
+    assert.strictEqual(lastOpts.method, 'GET');
+  });
+
+  it('throws SOURCE_UNAVAILABLE on 410 Gone', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: false, status: 410, json: () => Promise.resolve({}) });
+
+    await assert.rejects(
+      searchByLabels({ creds, labels: ['a'], project: 'KAN', fetchImpl }),
+      (err) => err.code === 'SOURCE_UNAVAILABLE'
+    );
+  });
+
   it('token never leaks into error messages (401)', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'super-secret-token' };
     const fetchImpl = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });

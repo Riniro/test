@@ -107,11 +107,13 @@ function _handleResponse(_req, response) {
  * @param {string} opts.email
  * @param {string} opts.token
  * @param {string} opts.path
+ * @param {URLSearchParams} [opts.searchParams]
  * @param {(url: string, init?: RequestInit) => Promise<Response>} opts.fetchImpl
  * @returns {Promise<unknown>} parsed JSON body
  */
-async function _get({ site, email, token, path: endpoint, fetchImpl }) {
-  const url = `${site}/rest/api/2${endpoint}`;
+async function _get({ site, email, token, path: endpoint, searchParams, fetchImpl }) {
+  const baseUrl = `${site}/rest/api/2${endpoint}`;
+  const url = searchParams ? `${baseUrl}?${searchParams.toString()}` : baseUrl;
   let response;
   try {
     response = await fetchImpl(url, {
@@ -219,7 +221,8 @@ export async function searchByLabels({ creds, labels, project, fetchImpl }) {
       site: creds.site,
       email: creds.email,
       token: creds.token,
-      path: '/search',
+      path: '/search/jql',
+      searchParams: new URLSearchParams({ jql }),
       fetchImpl: fetcher,
     })
   );
