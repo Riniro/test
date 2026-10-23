@@ -113,3 +113,32 @@ export function decide(params) {
 
   return { verdict, reasons };
 }
+
+/**
+ * Summarise a `decide` result into a single short line for the coordinator log.
+ *
+ * @param {object}  result  — `{ verdict, reasons }` as returned by `decide`
+ * @returns {string}
+ */
+export function summarize(result) {
+  // Rule 4: argument must be an object (not null, not array, not primitive)
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    throw new TypeError('summarize expects an object argument');
+  }
+
+  // Rule 5: verdict must be present and a string
+  const { verdict, reasons } = result;
+  if (verdict === null || verdict === undefined || typeof verdict !== 'string') {
+    throw new TypeError('summarize expects a string verdict');
+  }
+
+  const codes = Array.isArray(reasons) ? reasons.filter(r => typeof r === 'string' && r !== '') : [];
+
+  // Rule 3: empty / absent reasons → single-string, no colon
+  if (codes.length === 0) {
+    return verdict;
+  }
+
+  // Rule 1, 2: "<verdict>: <reason1>, <reason2>"
+  return `${verdict}: ${codes.join(', ')}`;
+}

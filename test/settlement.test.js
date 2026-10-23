@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decide } from '../tools/coordinator/settlement.js';
+import { decide, summarize } from '../tools/coordinator/settlement.js';
 
 // Helpers ---------------------------------------------------------------
 
@@ -363,4 +363,78 @@ test('correct workerDone + finished status + missing work → SETTLED_BY_WORKER'
   });
   assert.equal(res.verdict, 'SETTLED_BY_WORKER');
   assert.ok(res.reasons.includes('COMMIT_UNKNOWN'));
+});
+
+// === summarize tests (KAN-8) ===
+
+// 9. Вердикт с несколькими причинами
+test('summarize: multiple reasons joined with ", "', () => {
+  const res = decide({
+    dispatch: makeDispatch({ workerDone: null, status: 'dispatched' }),
+    work: makeWork({ commit: 'abc123' }),
+    tests: makeTests({ ran: true, passed: true, failed: 0 }),
+  });
+  const summary = summarize(res);
+  // WORK_PRESENT_UNSETTLED with NO_WORKER_DONE and other reasons
+  assert.match(summary, /^WORK_PRESENT_UNSETTLED: .+,.+/);
+  assert.ok(summary.startsWith('WORK_PRESENT_UNSETTLED: '));
+  const [prefix, ...rest] = summary.split(': ');
+  assert.equal(prefix, 'WORK_PRESENT_UNSETTLED');
+  const joined = rest.join(': ');
+  assert.equal(joined, res.reasons.join(', '));
+});
+
+// 10. Вердикт с одной причиной
+test('summarize: single reason', () => {
+  const res = summarize({ verdict: 'WORK_PRESENT_UNSETTLED', reasons: ['COMMIT_PRESENT'] });
+  assert.equal(res, 'WORK_PRESENT_UNSETTLED: COMMIT_PRESENT');
+});
+
+// 11. Пустой массив причин
+test('summarize: empty reasons array → verdict only', () => {
+  const res = summarize({ verdict: 'SETTLED_BY_WORKER', reasons: [] });
+  assert.equal(res, 'SETTLED_BY_WORKER');
+});
+
+// 12. Отсутствующий reasons
+test('summarize: missing reasons → verdict only', () => {
+  const res = summarize({ verdict: 'NO_WORK_UNSETTLED' });
+  assert.equal(res, 'NO_WORK_UNSETTLED');
+});
+
+// 13. TypeError на не-объекте и на отсутствующем verdict
+test('summarize: TypeError on non-object', () => {
+  assert.throws(() => summarize('string'), TypeError);
+  assert.throws(() => summarize(42), TypeError);
+  assert.throws(() => summarize(null), TypeError);
+  assert.throws(() => summarize([]), TypeError);
+});
+
+test('summarize: TypeError on missing verdict', () => {
+  assert.throws(() => summarize({ reasons: ['X'] }), TypeError);
+  assert.throws(() => summarize({}), TypeError);
+  assert.throws(() => summarize({ verdict: 42 }), TypeError);
+  assert.throws(() => summarize({ verdict: null }), TypeError);
+  assert.throws(() => summarize({ verdict: undefined }), TypeError);
+});
+
+// 14. Вход не изменился после вызова
+test('summarize: input object not mutated', () => {
+  const input = { verdict: 'WORK_PRESENT_UNSETTLED', reasons: ['COMMIT_PRESENT', 'TESTS_PASSED'] };
+  const before = JSON.stringify(input);
+  summarize(input);
+  assert.equal(JSON.stringify(input), before);
+});
+
+// 15. Integration: decide → summarize pipeline
+test('summarize integrates with decide: pipeline test', () => {
+  const res = decide({
+    dispatch: makeDispatch({ workerDone: null, status: 'dispatched' }),
+    work: makeWork({ commit: 'abc123' }),
+    tests: makeTests({ ran: true, passed: true, failed: 0 }),
+  });
+  const summary = summarize(res);
+  assert.ok(typeof summary === 'string');
+  assert.ok(summary.length > 0);
+  assert.ok(summary.startsWith(res.verdict + ': ') || summary === res.verdict);
 });
