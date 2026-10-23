@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -24,6 +24,24 @@ function createGitRepo(dir) {
   fs.writeFileSync(join(dir, 'README.md'), '# test\n');
   spawnSync('git', ['add', 'README.md'], { cwd: dir, stdio: 'ignore' });
   spawnSync('git', ['commit', '-m', 'initial'], { cwd: dir, stdio: 'ignore' });
+}
+
+/**
+ * Create a Node stub script in `dir` that prints `json` to stdout for any
+ * arguments. The stub is plain JavaScript run by process.execPath, so it
+ * needs no executable bit and no platform-specific wrapper.
+ * Returns the environment that makes settle.js launch it instead of orca.
+ */
+function createOrcaStub(dir, json) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const stubPath = join(dir, 'stub.js');
+  fs.writeFileSync(stubPath, 'process.stdout.write(' + JSON.stringify(json) + ');' + String.fromCharCode(10), 'utf8');
+  return {
+    SETTLE_ORCA_EXEC: process.execPath,
+    SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]),
+  };
 }
 
 /**
@@ -183,6 +201,10 @@ test('stdout is parseable JSON without cleanup', () => {
   const worktree = join(tmpRoot, 'worktree4');
   createGitRepo(worktree);
 
+  const toolsDir = join(tmpRoot, 'bin-28');
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_parse","taskId":"task_parse","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
+
   const r = spawnSettle([
     '--run', 'run-json-parse',
     '--task', 'task_parse',
@@ -190,7 +212,7 @@ test('stdout is parseable JSON without cleanup', () => {
     '--worktree', worktree,
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ]);
+  ], stubEnv);
 
   // No stderr output (only stdout)
   strictEqual(r.stderr, '');
@@ -289,24 +311,9 @@ test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20'
   const worktree = join(tmpRoot, 'worktree-stopped-commit');
   createGitRepo(worktree);
 
-  // Create a temporary dir with an 'orca' stub that returns a stopped record
   const toolsDir = join(tmpRoot, 'bin-34');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  const stubPath = join(toolsDir, 'orca.cmd');
-  const stubScript = [
-    '@echo off',
-    'setlocal',
-    'set OUT=',
-    'if "%1"=="orca" goto args',
-    'if "%1"=="orchestration" goto args',
-    'if "%1"=="worker-list" goto args',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}',
-    'goto :eof',
-    ':args',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}',
-    'goto :eof',
-  ].join('\r\n');
-  fs.writeFileSync(stubPath, stubScript);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
 
   const r = spawnSettle([
     '--run', 'run-stopped',
@@ -315,7 +322,7 @@ test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20'
     '--worktree', worktree,
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ], { PATH: toolsDir + ';' + process.env.PATH });
+  ], stubEnv);
 
   strictEqual(r.status, 20);
   const out = JSON.parse(r.stdout);
@@ -340,12 +347,8 @@ test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', () => {
   // No commit — empty repo
 
   const toolsDir = join(tmpRoot, 'bin-35');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  const stubPath = join(toolsDir, 'orca.cmd');
-  fs.writeFileSync(stubPath, [
-    '@echo off',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","workerState":"stopped","dispatchStatus":"stopped"}]}}',
-  ].join('\r\n'));
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
 
   const r = spawnSettle([
     '--run', 'run-empty',
@@ -354,7 +357,7 @@ test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', () => {
     '--worktree', worktree,
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ], { PATH: toolsDir + ';' + process.env.PATH });
+  ], stubEnv);
 
   strictEqual(r.status, 21);
   const out = JSON.parse(r.stdout);
@@ -370,12 +373,8 @@ test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
   ensureTmpDir();
 
   const toolsDir = join(tmpRoot, 'bin-36');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  const stubPath = join(toolsDir, 'orca.cmd');
-  fs.writeFileSync(stubPath, [
-    '@echo off',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","workerState":"stopped","dispatchStatus":"stopped"}]}}',
-  ].join('\r\n'));
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
 
   const r = spawnSettle([
     '--run', 'run-miss',
@@ -384,7 +383,7 @@ test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
     '--worktree', join(tmpRoot, 'does-not-exist-36'),
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ], { PATH: toolsDir + ';' + process.env.PATH });
+  ], stubEnv);
 
   strictEqual(r.status, 22);
   const out = JSON.parse(r.stdout);
@@ -402,12 +401,8 @@ test('stopped workerState → found=false, recordFound=true', () => {
   createGitRepo(worktree);
 
   const toolsDir = join(tmpRoot, 'bin-37');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  const stubPath = join(toolsDir, 'orca.cmd');
-  fs.writeFileSync(stubPath, [
-    '@echo off',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","workerState":"stopped","dispatchStatus":"stopped"}]}}',
-  ].join('\r\n'));
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
 
   const r = spawnSettle([
     '--run', 'run-f',
@@ -416,7 +411,7 @@ test('stopped workerState → found=false, recordFound=true', () => {
     '--worktree', worktree,
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ], { PATH: toolsDir + ';' + process.env.PATH });
+  ], stubEnv);
 
   strictEqual(r.status, 20);
   const out = JSON.parse(r.stdout);
@@ -434,12 +429,8 @@ test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, ex
   createGitRepo(worktree);
 
   const toolsDir = join(tmpRoot, 'bin-38');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  const stubPath = join(toolsDir, 'orca.cmd');
-  fs.writeFileSync(stubPath, [
-    '@echo off',
-    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","workerState":"succeeded","dispatchStatus":"completed"}]}}',
-  ].join('\r\n'));
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json);
 
   const r = spawnSettle([
     '--run', 'run-ok',
@@ -448,7 +439,7 @@ test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, ex
     '--worktree', worktree,
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
-  ], { PATH: toolsDir + ';' + process.env.PATH });
+  ], stubEnv);
 
   strictEqual(r.status, 0);
   const out = JSON.parse(r.stdout);

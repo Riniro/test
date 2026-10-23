@@ -3,7 +3,7 @@
 // Wraps the pure `decide()` verdict module with CLI arg parsing, polling,
 // evidence collection, journal recording, and JSON stdout.
 
-import { spawnSync, execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { join } from 'node:path';
@@ -15,6 +15,39 @@ import { decide } from './settlement.js';
 // ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Launch adapter: how the Orca CLI is invoked.
+//
+// Production: the exact Orca executable of this Run, with no prefix arguments.
+// Tests: process.execPath plus an absolute path to a temporary stub script.
+//
+// The command line is never split on spaces: the executable and every prefix
+// argument are passed separately, and spawnSync runs with shell: false.
+// ---------------------------------------------------------------------------
+
+function resolveOrcaLaunch(env = process.env) {
+  const executable = env.SETTLE_ORCA_EXEC || 'orca';
+
+  let prefixArgs = [];
+  const raw = env.SETTLE_ORCA_PREFIX_ARGS_JSON;
+  if (raw !== undefined && raw !== '') {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      die('SETTLE_ORCA_PREFIX_ARGS_JSON is not valid JSON.');
+      return { executable, prefixArgs: [] };
+    }
+    if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'string')) {
+      die('SETTLE_ORCA_PREFIX_ARGS_JSON must be a JSON array of strings.');
+      return { executable, prefixArgs: [] };
+    }
+    prefixArgs = parsed;
+  }
+
+  return { executable, prefixArgs };
+}
 
 function die(msg) {
   process.stderr.write(msg + '\n');
@@ -96,10 +129,26 @@ export function parseWorkerList(raw) {
 
 function collectWorkerDone(runId, taskId, dispatchId) {
   try {
-    const out = execSync(`orca orchestration worker-list --run ${JSON.stringify(runId)} --json`, {
+    const launch = resolveOrcaLaunch();
+    const result = spawnSync(launch.executable, [
+      ...launch.prefixArgs,
+      'orchestration', 'worker-list', '--run', runId, '--json',
+    ], {
       encoding: 'utf8',
-      env: { ...process.env },
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
     });
+
+    if (result.error || result.status !== 0) {
+      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    }
+
+    const out = result.stdout;
+    if (typeof out !== 'string' || out.trim().length === 0) {
+      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    }
+
     const list = parseWorkerList(out);
     const rec = list.find(r => r.dispatchId === dispatchId && r.taskId === taskId);
     if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
@@ -113,7 +162,7 @@ function collectWorkerDone(runId, taskId, dispatchId) {
       dispatchId,
     };
   } catch {
-    // Command failed or response unparseable → unknown
+    // spawnSync does not throw; unreachable but kept for safety
     return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
   }
 }
@@ -121,14 +170,25 @@ function collectWorkerDone(runId, taskId, dispatchId) {
 function collectCommit(worktree) {
   if (!worktree || !fs.existsSync(worktree)) return null;
   try {
-    const out = execSync(`git -C ${JSON.stringify(worktree)} log --oneline -1 --format=%H`, { encoding: 'utf8' });
-    const sha = out.trim();
-    return sha || '';
-  } catch (err) {
-    // git log exits 128 on empty repo (no commits); treat as empty string.
-    // Any other git error → null.
-    if (err && err.code === 'ENOENT') return null;
-    if (err && typeof err.status === 'number' && err.status === 128) return '';
+    const result = spawnSync('git', [
+      '-C', worktree, 'log', '--oneline', '-1', '--format=%H',
+    ], {
+      encoding: 'utf8',
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (result.error) {
+      return null;
+    }
+    if (result.status !== 0) {
+      if (result.status === 128) return '';
+      return null;
+    }
+
+    const out = result.stdout;
+    return typeof out === 'string' ? out.trim() : '';
+  } catch {
     return null;
   }
 }
@@ -331,6 +391,8 @@ function watch(args) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+export { resolveOrcaLaunch };
 
 export function main({ argv = process.argv.slice(2), cwd = process.cwd(), env = process.env } = {}) {
   const args = parseArgs(argv);
