@@ -296,3 +296,71 @@ test('tests.ran: false → TESTS_NOT_RUN, not TESTS_FAILED', () => {
   assert.ok(res.reasons.includes('TESTS_NOT_RUN'));
   assert.ok(!res.reasons.includes('TESTS_FAILED'));
 });
+
+// === KAN-8-A2: missing work evidence → UNKNOWN / UNVERIFIABLE ===
+
+test('missing work (undefined) → UNVERIFIABLE with COMMIT_UNKNOWN', () => {
+  const res = decide({
+    dispatch: makeDispatch({ status: 'stopped', expectedTaskId: 't1', expectedDispatchId: 'd1' }),
+    work: undefined,
+    tests: makeTests({ ran: false }),
+  });
+  assert.equal(res.verdict, 'UNVERIFIABLE');
+  assert.ok(res.reasons.includes('COMMIT_UNKNOWN'));
+  assert.ok(!res.reasons.includes('COMMIT_ABSENT'));
+});
+
+test('work null → UNVERIFIABLE with COMMIT_UNKNOWN', () => {
+  const res = decide({
+    dispatch: makeDispatch({ status: 'stopped', expectedTaskId: 't1', expectedDispatchId: 'd1' }),
+    work: null,
+    tests: makeTests({ ran: false }),
+  });
+  assert.equal(res.verdict, 'UNVERIFIABLE');
+  assert.ok(res.reasons.includes('COMMIT_UNKNOWN'));
+  assert.ok(!res.reasons.includes('COMMIT_ABSENT'));
+});
+
+test('work {} (commit absent) → UNVERIFIABLE with COMMIT_UNKNOWN', () => {
+  const res = decide({
+    dispatch: makeDispatch({ status: 'stopped', expectedTaskId: 't1', expectedDispatchId: 'd1' }),
+    work: {},
+    tests: makeTests({ ran: false }),
+  });
+  assert.equal(res.verdict, 'UNVERIFIABLE');
+  assert.ok(res.reasons.includes('COMMIT_UNKNOWN'));
+  assert.ok(!res.reasons.includes('COMMIT_ABSENT'));
+});
+
+test('work commit empty string → NO_WORK_UNSETTLED with COMMIT_ABSENT', () => {
+  const res = decide({
+    dispatch: makeDispatch({ status: 'stopped', expectedTaskId: 't1', expectedDispatchId: 'd1' }),
+    work: { commit: '' },
+    tests: makeTests({ ran: false }),
+  });
+  assert.equal(res.verdict, 'NO_WORK_UNSETTLED');
+  assert.ok(res.reasons.includes('COMMIT_ABSENT'));
+});
+
+test('work commit non-empty → COMMIT_PRESENT, verdict not UNVERIFIABLE', () => {
+  const res = decide({
+    dispatch: makeDispatch({ workerDone: null, status: 'dispatched' }),
+    work: { commit: 'abc123' },
+    tests: makeTests({ ran: true, passed: true, failed: 0 }),
+  });
+  assert.notEqual(res.verdict, 'UNVERIFIABLE');
+  assert.ok(res.reasons.includes('COMMIT_PRESENT'));
+});
+
+test('correct workerDone + finished status + missing work → SETTLED_BY_WORKER', () => {
+  const res = decide({
+    dispatch: makeDispatch({
+      workerDone: { taskId: 'task-1', dispatchId: 'ctx-1', outcome: 'succeeded' },
+      status: 'completed',
+    }),
+    work: undefined,
+    tests: makeTests({ ran: true, passed: true, failed: 0 }),
+  });
+  assert.equal(res.verdict, 'SETTLED_BY_WORKER');
+  assert.ok(res.reasons.includes('COMMIT_UNKNOWN'));
+});

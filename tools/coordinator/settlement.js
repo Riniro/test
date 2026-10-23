@@ -55,8 +55,9 @@ export function decide(params) {
   }
 
   // -- work --
-  const commitPresent = w?.commit !== null && w?.commit !== undefined && w.commit !== '';
-  const commitUnknown = w?.commit === null;
+  // Missing or null work object, or absent commit field → unknown.
+  const commitUnknown = !w || w.commit === null || w.commit === undefined;
+  const commitPresent = w && w.commit !== null && w.commit !== undefined && w.commit !== '';
 
   if (commitUnknown) {
     reasons.push('COMMIT_UNKNOWN');
@@ -106,7 +107,8 @@ export function decide(params) {
 
   // reasons must always be non-empty
   if (reasons.length === 0) {
-    reasons.push('COMMIT_PRESENT');
+    reasons.push('NO_EVIDENCE');
+    verdict = 'UNVERIFIABLE';
   }
 
   return { verdict, reasons };
