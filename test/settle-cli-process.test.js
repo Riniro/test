@@ -281,6 +281,183 @@ test('evidence.dispatchStatus present when worker stopped', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 34. Дефект 1 + 7: stopped dispatch + worktree с коммитом → WORK_PRESENT_UNSETTLED
+// ---------------------------------------------------------------------------
+
+test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20', () => {
+  ensureTmpDir();
+  const worktree = join(tmpRoot, 'worktree-stopped-commit');
+  createGitRepo(worktree);
+
+  // Create a temporary dir with an 'orca' stub that returns a stopped record
+  const toolsDir = join(tmpRoot, 'bin-34');
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
+  const stubPath = join(toolsDir, 'orca.cmd');
+  const stubScript = [
+    '@echo off',
+    'setlocal',
+    'set OUT=',
+    'if "%1"=="orca" goto args',
+    'if "%1"=="orchestration" goto args',
+    'if "%1"=="worker-list" goto args',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}',
+    'goto :eof',
+    ':args',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}',
+    'goto :eof',
+  ].join('\r\n');
+  fs.writeFileSync(stubPath, stubScript);
+
+  const r = spawnSettle([
+    '--run', 'run-stopped',
+    '--task', 'task_stopped',
+    '--dispatch', 'ctx_stopped',
+    '--worktree', worktree,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], { PATH: toolsDir + ';' + process.env.PATH });
+
+  strictEqual(r.status, 20);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(typeof out.evidence.commit, 'string');
+  strictEqual(out.evidence.commit.length, 40);
+  strictEqual(out.evidence.workerDone.found, false);
+  strictEqual(out.evidence.workerDone.recordFound, true);
+});
+
+// ---------------------------------------------------------------------------
+// 35. Дефект 1 + 8: stopped dispatch + worktree без коммитов → NO_WORK_UNSETTLED
+// ---------------------------------------------------------------------------
+
+test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', () => {
+  ensureTmpDir();
+  const worktree = join(tmpRoot, 'worktree-empty-35');
+  if (!fs.existsSync(worktree)) fs.mkdirSync(worktree, { recursive: true });
+  spawnSync('git', ['init'], { cwd: worktree, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.email', 'test@test.com'], { cwd: worktree, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.name', 'Test'], { cwd: worktree, stdio: 'ignore' });
+  // No commit — empty repo
+
+  const toolsDir = join(tmpRoot, 'bin-35');
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
+  const stubPath = join(toolsDir, 'orca.cmd');
+  fs.writeFileSync(stubPath, [
+    '@echo off',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","workerState":"stopped","dispatchStatus":"stopped"}]}}',
+  ].join('\r\n'));
+
+  const r = spawnSettle([
+    '--run', 'run-empty',
+    '--task', 'task_empty',
+    '--dispatch', 'ctx_empty',
+    '--worktree', worktree,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], { PATH: toolsDir + ';' + process.env.PATH });
+
+  strictEqual(r.status, 21);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'NO_WORK_UNSETTLED');
+  strictEqual(out.evidence.commit, '');
+});
+
+// ---------------------------------------------------------------------------
+// 36. Дефект 1 + 9: worktree не существует → UNVERIFIABLE, exit 22, commit=null
+// ---------------------------------------------------------------------------
+
+test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
+  ensureTmpDir();
+
+  const toolsDir = join(tmpRoot, 'bin-36');
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
+  const stubPath = join(toolsDir, 'orca.cmd');
+  fs.writeFileSync(stubPath, [
+    '@echo off',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","workerState":"stopped","dispatchStatus":"stopped"}]}}',
+  ].join('\r\n'));
+
+  const r = spawnSettle([
+    '--run', 'run-miss',
+    '--task', 'task_miss',
+    '--dispatch', 'ctx_miss',
+    '--worktree', join(tmpRoot, 'does-not-exist-36'),
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], { PATH: toolsDir + ';' + process.env.PATH });
+
+  strictEqual(r.status, 22);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'UNVERIFIABLE');
+  strictEqual(out.evidence.commit, null);
+});
+
+// ---------------------------------------------------------------------------
+// 37. Дефект 2: stopped workerState → found=false, recordFound=true
+// ---------------------------------------------------------------------------
+
+test('stopped workerState → found=false, recordFound=true', () => {
+  ensureTmpDir();
+  const worktree = join(tmpRoot, 'worktree-found-37');
+  createGitRepo(worktree);
+
+  const toolsDir = join(tmpRoot, 'bin-37');
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
+  const stubPath = join(toolsDir, 'orca.cmd');
+  fs.writeFileSync(stubPath, [
+    '@echo off',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","workerState":"stopped","dispatchStatus":"stopped"}]}}',
+  ].join('\r\n'));
+
+  const r = spawnSettle([
+    '--run', 'run-f',
+    '--task', 'task_f',
+    '--dispatch', 'ctx_f',
+    '--worktree', worktree,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], { PATH: toolsDir + ';' + process.env.PATH });
+
+  strictEqual(r.status, 20);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.evidence.workerDone.found, false);
+  strictEqual(out.evidence.workerDone.recordFound, true);
+});
+
+// ---------------------------------------------------------------------------
+// 38. Дефект 2 + 11: succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, exit 0
+// ---------------------------------------------------------------------------
+
+test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, exit 0', () => {
+  ensureTmpDir();
+  const worktree = join(tmpRoot, 'worktree-succeeded-38');
+  createGitRepo(worktree);
+
+  const toolsDir = join(tmpRoot, 'bin-38');
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
+  const stubPath = join(toolsDir, 'orca.cmd');
+  fs.writeFileSync(stubPath, [
+    '@echo off',
+    'echo {"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","workerState":"succeeded","dispatchStatus":"completed"}]}}',
+  ].join('\r\n'));
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], { PATH: toolsDir + ';' + process.env.PATH });
+
+  strictEqual(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'SETTLED_BY_WORKER');
+  strictEqual(out.evidence.workerDone.found, true);
+  strictEqual(out.evidence.workerDone.recordFound, true);
+});
+
+// ---------------------------------------------------------------------------
 // Helper assertion
 // ---------------------------------------------------------------------------
 

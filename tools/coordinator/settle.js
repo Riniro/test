@@ -102,17 +102,19 @@ function collectWorkerDone(runId, taskId, dispatchId) {
     });
     const list = parseWorkerList(out);
     const rec = list.find(r => r.dispatchId === dispatchId && r.taskId === taskId);
-    if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null };
+    if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
     return {
       found: true,
       recordFound: true,
       status: rec.workerState || null,
       dispatchStatus: rec.dispatchStatus || null,
       raw: rec,
+      taskId,
+      dispatchId,
     };
   } catch {
     // Command failed or response unparseable → unknown
-    return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null };
+    return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
   }
 }
 
@@ -122,7 +124,11 @@ function collectCommit(worktree) {
     const out = execSync(`git -C ${JSON.stringify(worktree)} log --oneline -1 --format=%H`, { encoding: 'utf8' });
     const sha = out.trim();
     return sha || '';
-  } catch {
+  } catch (err) {
+    // git log exits 128 on empty repo (no commits); treat as empty string.
+    // Any other git error → null.
+    if (err && err.code === 'ENOENT') return null;
+    if (err && typeof err.status === 'number' && err.status === 128) return '';
     return null;
   }
 }
@@ -199,11 +205,6 @@ function watch(args) {
       }
     }
 
-    // Collect commit (once per loop, cheap)
-    if (!foundWorkerDone && !foundDispatchFinished) {
-      commit = collectCommit(args.worktree);
-    }
-
     // Early-stop check
     if (foundWorkerDone && foundDispatchFinished) break;
     if (foundWorkerDone) break; // worker_done succeeded is enough
@@ -223,17 +224,23 @@ function watch(args) {
 
   deadlineExceeded = Date.now() >= deadline;
 
+  // Collect commit evidence once after polling (before building evidence).
+  commit = collectCommit(args.worktree);
+
   // Run tests once after polling
   tests = collectTests(args.tests);
 
   // Build evidence
   const evidence = {
     workerDone: {
-      found: workerDoneResult?.found || false,
+      found: (workerDoneResult?.status === 'succeeded' &&
+              workerDoneResult?.recordFound &&
+              workerDoneResult?.taskId === args.task &&
+              workerDoneResult?.dispatchId === args.dispatch),
       recordFound: workerDoneResult?.recordFound || false,
       status: workerDoneResult?.status || null,
-      taskId: args.task,
-      dispatchId: args.dispatch,
+      taskId: workerDoneResult?.taskId || args.task,
+      dispatchId: workerDoneResult?.dispatchId || args.dispatch,
       workerState: workerDoneResult?.status || null,
     },
     dispatchStatus: dispatchStatus,
