@@ -1,0 +1,5 @@
+{
+  "tools": {
+    "exclude": ["ask_user_question"]
+  }
+}
