@@ -1,6 +1,7 @@
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
 import { join, delimiter } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -14,14 +15,14 @@ import * as settleModule from '../tools/coordinator/settle.js';
  * Create a temp directory with a minimal git repo inside it.
  */
 function createGitRepo(dir) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
   spawnSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.email', 'test@test.com'], { cwd: dir, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.name', 'Test'], { cwd: dir, stdio: 'ignore' });
   // Create a file and commit it
-  fs.writeFileSync(join(dir, 'README.md'), '# test\n');
+  writeFileSync(join(dir, 'README.md'), '# test\n');
   spawnSync('git', ['add', 'README.md'], { cwd: dir, stdio: 'ignore' });
   spawnSync('git', ['commit', '-m', 'initial'], { cwd: dir, stdio: 'ignore' });
 }
@@ -33,11 +34,11 @@ function createGitRepo(dir) {
  * Returns the environment that makes settle.js launch it instead of orca.
  */
 function createOrcaStub(dir, json) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
   const stubPath = join(dir, 'stub.js');
-  fs.writeFileSync(stubPath, 'process.stdout.write(' + JSON.stringify(json) + ');' + String.fromCharCode(10), 'utf8');
+  writeFileSync(stubPath, 'process.stdout.write(' + JSON.stringify(json) + ');' + String.fromCharCode(10), 'utf8');
   return {
     SETTLE_ORCA_EXEC: process.execPath,
     SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]),
@@ -60,12 +61,6 @@ function spawnSettle(argv, extraEnv) {
   });
 }
 
-// Helpers to get temp dirs
-const tmpRoot = join(__dirname, '..', '.qwen', 'tmp', 'settle-test-' + Date.now());
-function ensureTmpDir() {
-  if (!fs.existsSync(tmpRoot)) fs.mkdirSync(tmpRoot, { recursive: true });
-}
-
 // ---------------------------------------------------------------------------
 // 23. Неверное использование — код 2
 // ---------------------------------------------------------------------------
@@ -84,11 +79,13 @@ test('exit 2 on missing required flag', () => {
 // 24. Недоступные сведения о dispatch — UNVERIFIABLE, код 22
 // ---------------------------------------------------------------------------
 
-test('UNVERIFIABLE when run does not exist but worktree has commit', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree1');
+test('UNVERIFIABLE when run does not exist but worktree has commit', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree1');
   createGitRepo(worktree);
-  const stateDir = join(tmpRoot, 'state1');
+  const stateDir = join(dir, 'state1');
 
   const r = spawnSettle([
     '--run', 'nonexistent-run-12345',
@@ -108,14 +105,15 @@ test('UNVERIFIABLE when run does not exist but worktree has commit', () => {
 // 25. --worktree на несуществующий каталог — evidence.commit = null
 // ---------------------------------------------------------------------------
 
-test('commit is null when worktree does not exist', () => {
-  ensureTmpDir();
+test('commit is null when worktree does not exist', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const r = spawnSettle([
     '--run', 'nonexistent-run',
     '--task', 'task_xyz',
     '--dispatch', 'ctx_abc',
-    '--worktree', join(tmpRoot, 'nonexistent-dir'),
+    '--worktree', join(dir, 'nonexistent-dir'),
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
   ]);
@@ -130,14 +128,15 @@ test('commit is null when worktree does not exist', () => {
 // 26. Короткий дедлайн — deadlineExceeded: true, завершается за конечное время
 // ---------------------------------------------------------------------------
 
-test('deadlineExceeded with short deadline', () => {
-  ensureTmpDir();
+test('deadlineExceeded with short deadline', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const r = spawnSettle([
     '--run', 'nonexistent-run',
     '--task', 'task_xyz',
     '--dispatch', 'ctx_abc',
-    '--worktree', join(tmpRoot, 'nonexistent-dir'),
+    '--worktree', join(dir, 'nonexistent-dir'),
     '--deadline-ms', '1000',
     '--poll-ms', '200',
   ]);
@@ -151,10 +150,12 @@ test('deadlineExceeded with short deadline', () => {
 // 27. Повторный запуск — alreadyRecorded: true, файл не меняется
 // ---------------------------------------------------------------------------
 
-test('alreadyRecorded on second run with same verdict', () => {
-  ensureTmpDir();
-  const stateDir = join(tmpRoot, 'state3');
-  const worktree = join(tmpRoot, 'worktree3');
+test('alreadyRecorded on second run with same verdict', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const stateDir = join(dir, 'state3');
+  const worktree = join(dir, 'worktree3');
   createGitRepo(worktree);
 
   const first = spawnSettle([
@@ -172,7 +173,7 @@ test('alreadyRecorded on second run with same verdict', () => {
 
   // Read journal before second run
   const journalPath = join(stateDir, 'default', 'settlements.json');
-  const journalBefore = fs.readFileSync(journalPath, 'utf8');
+  const journalBefore = readFileSync(journalPath, 'utf8');
 
   // Second run
   const second = spawnSettle([
@@ -189,19 +190,21 @@ test('alreadyRecorded on second run with same verdict', () => {
   strictEqual(out2.alreadyRecorded, true);
 
   // Journal must not have changed
-  strictEqual(fs.readFileSync(journalPath, 'utf8'), journalBefore);
+  strictEqual(readFileSync(journalPath, 'utf8'), journalBefore);
 });
 
 // ---------------------------------------------------------------------------
 // 28. stdout разобра́ть JSON.parse без предварительной чистки
 // ---------------------------------------------------------------------------
 
-test('stdout is parseable JSON without cleanup', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree4');
+test('stdout is parseable JSON without cleanup', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree4');
   createGitRepo(worktree);
 
-  const toolsDir = join(tmpRoot, 'bin-28');
+  const toolsDir = join(dir, 'bin-28');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_parse","taskId":"task_parse","workerState":"succeeded","dispatchStatus":"completed"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
@@ -225,9 +228,11 @@ test('stdout is parseable JSON without cleanup', () => {
 // 29. recommendedRecovery не содержит lifecycle-мутаций
 // ---------------------------------------------------------------------------
 
-test('recommendedRecovery does not contain mutation commands', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree5');
+test('recommendedRecovery does not contain mutation commands', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree5');
   createGitRepo(worktree);
 
   const r = spawnSettle([
@@ -252,7 +257,7 @@ test('recommendedRecovery does not contain mutation commands', () => {
 // ---------------------------------------------------------------------------
 
 test('settle.js source does not reference lifecycle commands', () => {
-  const content = fs.readFileSync(SETTLE, 'utf8');
+  const content = readFileSync(SETTLE, 'utf8');
   strictEqual(content.includes('worker-stop'), false);
   strictEqual(content.includes('worker-abandon'), false);
   strictEqual(content.includes('worker-release'), false);
@@ -306,12 +311,14 @@ test('evidence.dispatchStatus present when worker stopped', () => {
 // 34. Дефект 1 + 7: stopped dispatch + worktree с коммитом → WORK_PRESENT_UNSETTLED
 // ---------------------------------------------------------------------------
 
-test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree-stopped-commit');
+test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree-stopped-commit');
   createGitRepo(worktree);
 
-  const toolsDir = join(tmpRoot, 'bin-34');
+  const toolsDir = join(dir, 'bin-34');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
@@ -337,16 +344,18 @@ test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20'
 // 35. Дефект 1 + 8: stopped dispatch + worktree без коммитов → NO_WORK_UNSETTLED
 // ---------------------------------------------------------------------------
 
-test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree-empty-35');
-  if (!fs.existsSync(worktree)) fs.mkdirSync(worktree, { recursive: true });
+test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree-empty-35');
+  mkdirSync(worktree, { recursive: true });
   spawnSync('git', ['init'], { cwd: worktree, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.email', 'test@test.com'], { cwd: worktree, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.name', 'Test'], { cwd: worktree, stdio: 'ignore' });
   // No commit — empty repo
 
-  const toolsDir = join(tmpRoot, 'bin-35');
+  const toolsDir = join(dir, 'bin-35');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","workerState":"stopped","dispatchStatus":"stopped"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
@@ -369,10 +378,11 @@ test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', () => {
 // 36. Дефект 1 + 9: worktree не существует → UNVERIFIABLE, exit 22, commit=null
 // ---------------------------------------------------------------------------
 
-test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
-  ensureTmpDir();
+test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
 
-  const toolsDir = join(tmpRoot, 'bin-36');
+  const toolsDir = join(dir, 'bin-36');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","workerState":"stopped","dispatchStatus":"stopped"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
@@ -380,7 +390,7 @@ test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
     '--run', 'run-miss',
     '--task', 'task_miss',
     '--dispatch', 'ctx_miss',
-    '--worktree', join(tmpRoot, 'does-not-exist-36'),
+    '--worktree', join(dir, 'does-not-exist-36'),
     '--deadline-ms', '5000',
     '--poll-ms', '1000',
   ], stubEnv);
@@ -395,12 +405,14 @@ test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', () => {
 // 37. Дефект 2: stopped workerState → found=false, recordFound=true
 // ---------------------------------------------------------------------------
 
-test('stopped workerState → found=false, recordFound=true', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree-found-37');
+test('stopped workerState → found=false, recordFound=true', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree-found-37');
   createGitRepo(worktree);
 
-  const toolsDir = join(tmpRoot, 'bin-37');
+  const toolsDir = join(dir, 'bin-37');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","workerState":"stopped","dispatchStatus":"stopped"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
@@ -423,12 +435,14 @@ test('stopped workerState → found=false, recordFound=true', () => {
 // 38. Дефект 2 + 11: succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, exit 0
 // ---------------------------------------------------------------------------
 
-test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, exit 0', () => {
-  ensureTmpDir();
-  const worktree = join(tmpRoot, 'worktree-succeeded-38');
+test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, exit 0', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree-succeeded-38');
   createGitRepo(worktree);
 
-  const toolsDir = join(tmpRoot, 'bin-38');
+  const toolsDir = join(dir, 'bin-38');
   const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","workerState":"succeeded","dispatchStatus":"completed"}]}}';
   const stubEnv = createOrcaStub(toolsDir, json);
 
