@@ -7,6 +7,9 @@ import test from 'node:test';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const SETTLE = join(__dirname, '..', 'tools', 'coordinator', 'settle.js');
 
+// Import for parseWorkerList tests
+import * as settleModule from '../tools/coordinator/settle.js';
+
 /**
  * Create a temp directory with a minimal git repo inside it.
  */
@@ -232,6 +235,49 @@ test('settle.js source does not reference lifecycle commands', () => {
   strictEqual(content.includes('worker-abandon'), false);
   strictEqual(content.includes('worker-release'), false);
   strictEqual(content.includes('task-update'), false);
+});
+
+// ---------------------------------------------------------------------------
+// 31. Разбор формы ответа Orca (data.result.workers) — SETTLED_BY_WORKER
+// ---------------------------------------------------------------------------
+
+test('parse data.result.workers and yield SETTLED_BY_WORKER', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+  const workers = settleModule.parseWorkerList(raw);
+  strictEqual(workers.length, 1);
+  strictEqual(workers[0].dispatchId, 'd1');
+  strictEqual(workers[0].taskId, 't1');
+  strictEqual(workers[0].workerState, 'succeeded');
+  strictEqual(workers[0].dispatchStatus, 'completed');
+});
+
+// ---------------------------------------------------------------------------
+// 32. Дефект 2: stopped workerState — не SETTLED_BY_WORKER
+// ---------------------------------------------------------------------------
+
+test('stopped workerState → not SETTLED_BY_WORKER', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const workers = settleModule.parseWorkerList(raw);
+  strictEqual(workers.length, 1);
+  strictEqual(workers[0].workerState, 'stopped');
+});
+
+// ---------------------------------------------------------------------------
+// 33. evidence.dispatchStatus присутствует в обоих случаях
+// ---------------------------------------------------------------------------
+
+test('evidence.dispatchStatus present when worker succeeded', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+  const workers = settleModule.parseWorkerList(raw);
+  strictEqual(workers.length, 1);
+  strictEqual(workers[0].dispatchStatus, 'completed');
+});
+
+test('evidence.dispatchStatus present when worker stopped', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const workers = settleModule.parseWorkerList(raw);
+  strictEqual(workers.length, 1);
+  strictEqual(workers[0].dispatchStatus, 'stopped');
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@
 import { spawnSync, execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import os from 'node:os';
@@ -67,19 +66,53 @@ function parseArgs(argv) {
 // Evidence collectors (independent — no cross-inference)
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse the JSON response from `orca orchestration worker-list` and return
+ * the workers array.  Handles multiple response shapes.
+ *
+ * Exported for testing so the test suite can exercise parsing without
+ * spawning a real `orca` CLI.
+ *
+ * @param {string} raw — raw JSON string from the CLI
+ * @returns {object[]} workers list
+ */
+export function parseWorkerList(raw) {
+  const data = JSON.parse(raw);
+
+  // data itself is the workers array
+  if (Array.isArray(data)) return data;
+
+  // Prefer data.result.workers (actual Orca response shape)
+  if (data?.result?.workers && Array.isArray(data.result.workers)) {
+    return data.result.workers;
+  }
+
+  // Fallback: top-level fields
+  if (Array.isArray(data.workers)) return data.workers;
+  if (Array.isArray(data.items)) return data.items;
+
+  return [];
+}
+
 function collectWorkerDone(runId, taskId, dispatchId) {
   try {
     const out = execSync(`orca orchestration worker-list --run ${JSON.stringify(runId)} --json`, {
       encoding: 'utf8',
       env: { ...process.env },
     });
-    const data = JSON.parse(out);
-    const list = Array.isArray(data) ? data : (data?.items || data?.workers || []);
+    const list = parseWorkerList(out);
     const rec = list.find(r => r.dispatchId === dispatchId && r.taskId === taskId);
-    if (!rec) return { found: false, status: null };
-    return { found: true, status: rec.workerState || null, dispatchStatus: rec.dispatchStatus || null, raw: rec };
+    if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null };
+    return {
+      found: true,
+      recordFound: true,
+      status: rec.workerState || null,
+      dispatchStatus: rec.dispatchStatus || null,
+      raw: rec,
+    };
   } catch {
-    return { found: false, status: null };
+    // Command failed or response unparseable → unknown
+    return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null };
   }
 }
 
@@ -139,7 +172,7 @@ function watch(args) {
   const deadline = start + args.deadlineMs;
   let deadlineExceeded = false;
 
-  let workerDone = { found: false, status: null };
+  let workerDoneResult = null;
   let dispatchStatus = null;
   let commit = null;
   let tests = { ran: false };
@@ -151,17 +184,14 @@ function watch(args) {
     // Collect worker_done
     if (!foundWorkerDone) {
       const result = collectWorkerDone(args.run, args.task, args.dispatch);
-      workerDone = {
-        found: result.found,
-        status: result.status,
-        dispatchStatus: result.dispatchStatus,
-      };
+      workerDoneResult = result;
       dispatchStatus = result.dispatchStatus;
 
-      if (result.found && result.status === 'succeeded') {
+      // recordFound = a record was found; found = worker_done actually succeeded
+      if (result.recordFound && result.status === 'succeeded') {
         foundWorkerDone = true;
-      } else if (result.found && result.status && result.status !== 'succeeded') {
-        // Check if dispatch status itself is finished
+      } else if (result.recordFound && result.status && result.status !== 'succeeded') {
+        // Dispatch is not succeeded — check if its own status is finished
         if (result.dispatchStatus && ['completed', 'failed', 'stopped', 'abandoned'].includes(result.dispatchStatus)) {
           foundDispatchFinished = true;
           foundWorkerDone = true; // we have enough info
@@ -170,7 +200,7 @@ function watch(args) {
     }
 
     // Collect commit (once per loop, cheap)
-    if (!foundWorkerDone || !foundDispatchFinished) {
+    if (!foundWorkerDone && !foundDispatchFinished) {
       commit = collectCommit(args.worktree);
     }
 
@@ -178,15 +208,17 @@ function watch(args) {
     if (foundWorkerDone && foundDispatchFinished) break;
     if (foundWorkerDone) break; // worker_done succeeded is enough
 
-    // Sleep until next poll
+    // Sleep until next poll (no busy-wait)
     const now = Date.now();
     if (now >= deadline) break;
     const wait = Math.max(0, Math.min(args.pollMs, deadline - now));
-    const ev = new EventEmitter();
-    setTimeout(() => { ev.emit('tick'); }, wait);
-    // Block briefly
-    const startWait = Date.now();
-    while (Date.now() - startWait < wait) { /* spin — acceptable for coordinator */ }
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    } catch {
+      // Atomics.wait may throw on some platforms; fall back to a busy loop
+      const endWait = Date.now() + wait;
+      while (Date.now() < endWait) { /* spin */ }
+    }
   }
 
   deadlineExceeded = Date.now() >= deadline;
@@ -197,10 +229,12 @@ function watch(args) {
   // Build evidence
   const evidence = {
     workerDone: {
-      found: workerDone.found,
-      status: workerDone.status,
+      found: workerDoneResult?.found || false,
+      recordFound: workerDoneResult?.recordFound || false,
+      status: workerDoneResult?.status || null,
       taskId: args.task,
       dispatchId: args.dispatch,
+      workerState: workerDoneResult?.status || null,
     },
     dispatchStatus: dispatchStatus,
     commit: commit,
@@ -208,12 +242,17 @@ function watch(args) {
   };
 
   // Build dispatch/work/tests for decide()
+  // workerDone is non-null ONLY when the worker actually succeeded.
+  const workerDoneObj = (workerDoneResult?.recordFound && workerDoneResult?.status === 'succeeded')
+    ? {
+        taskId: args.task,
+        dispatchId: args.dispatch,
+        status: workerDoneResult.status,
+      }
+    : null;
+
   const dispatchObj = {
-    workerDone: workerDone.found ? {
-      taskId: args.task,
-      dispatchId: args.dispatch,
-      status: workerDone.status,
-    } : null,
+    workerDone: workerDoneObj,
     expectedTaskId: args.task,
     expectedDispatchId: args.dispatch,
     status: dispatchStatus,
