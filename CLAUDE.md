@@ -30,6 +30,7 @@ Claude Opus — **единственный** Tech Lead, архитектор, к
 | Пошаговый SOP координатора | [docs/ai/coordinator.md](docs/ai/coordinator.md) |
 | Сбор брифа у пользователя | [docs/ai/brief-template.md](docs/ai/brief-template.md) |
 | ТЗ для Qwen-воркера | [docs/ai/worker-contract.md](docs/ai/worker-contract.md) |
+| Контракт Qwen-координатора | [docs/ai/qwen-coordinator.md](docs/ai/qwen-coordinator.md) |
 | Ревью результата воркера | [docs/ai/review-checklist.md](docs/ai/review-checklist.md) |
 | Jira: статусы, переходы, метки | [docs/ai/jira-workflow.md](docs/ai/jira-workflow.md) |
 | Сбои, зависания, восстановление | [docs/ai/recovery.md](docs/ai/recovery.md) |
