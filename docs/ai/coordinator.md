@@ -7,8 +7,34 @@
 Координатор запускается через защищённую команду, удерживающую блокировку репозитория, чтобы на одном
 хосте не работали два координатора сразу — см. [coordinator-runtime.md](coordinator-runtime.md).
 
+### 0.1 Preflight worktree координатора
+Выполняется **первым делом**: до чтения остального SOP, до Jira и до Orca. Цель — убедиться, что run
+начинается в своём worktree, на своей ветке и на актуальном `origin/master`.
+
+| Что проверяется | Команда | Требование |
+|---|---|---|
+| Путь | `git rev-parse --show-toplevel` | worktree координатора, не master-дерево и не worktree воркера |
+| Ветка | `git branch --show-current` | ветка координатора |
+| HEAD | `git rev-parse --short HEAD` | зафиксировать в журнале run |
+| Чистота | `git status --short` | пусто |
+| Расхождение | `git fetch origin --prune`, затем `git rev-list --left-right --count HEAD...origin/master` | 0 собственных коммитов впереди |
+
+Единственное разрешённое действие при отставании от `origin/master` — `git merge --ff-only origin/master`.
+Если fast-forward не проходит, он не форсируется.
+
+Run **не начинается**, выполняется остановка с сообщением человеку, если:
+* дерево грязное — незакоммиченные изменения сохраняются как есть, они могут быть чужими;
+* впереди `origin/master` есть собственные коммиты — состояние разбирает человек;
+* путь или ветка не соответствуют worktree координатора.
+
+Запрещены при любом исходе preflight: `git reset --hard`, `git checkout -- <путь>`, `git restore`,
+`git clean`, `git stash`, `push --force`. Чужие изменения не отбрасываются никогда —
+см. [../../AGENTS.md](../../AGENTS.md).
+
+### 0.2 Остальная подготовка
 1. `orca skills get orchestration --full` — загрузить актуальный orchestration guide.
-2. `git branch --show-current`, `git status --short`. Грязное дерево → стоп и сообщение человеку.
+   Guide из памяти считается устаревшим.
+2. Preflight по 0.1 пройден: путь, ветка, HEAD, чистое дерево, отсутствие расхождения зафиксированы.
 3. Зафиксировать **Run ID** для журнала в Jira.
 
 ## 1. Найти задачу
@@ -39,28 +65,31 @@
 15. Одновременно выполняются **максимум два независимых** воркера.
 16. Для `qwen-code` **не передавать `--model`** — Qwen резолвит собственную настройку `llm_model`.
 17. Записать `taskId` и `dispatchId` каждого dispatch в журнал.
+18. Пока воркер активен, координатор **не вносит собственных правок в его worktree**: свои изменения
+    он готовит в worktree координатора, а интеграция идёт коммитами — до запуска воркера либо после
+    settlement. Незакоммиченные правки другого автора в рабочем дереве воркера запрещены.
 
 ## 6. Ожидание
-18. Ждать `worker_done` / `question` / `escalation`.
-19. `question` → ответить по брифу; если ответа нет в брифе — `ai-needs-input` и остановка.
-20. Зависание или сбой → [recovery.md](recovery.md). Дубль prompt'а и второй воркер на ту же задачу запрещены.
+19. Ждать `worker_done` / `question` / `escalation`.
+20. `question` → ответить по брифу; если ответа нет в брифе — `ai-needs-input` и остановка.
+21. Зависание или сбой → [recovery.md](recovery.md). Дубль prompt'а и второй воркер на ту же задачу запрещены.
 
 ## 7. Независимая проверка
-21. Для каждого commit **независимо**: `git show --stat <sha>`, чтение diff.
-22. Запустить `node --test` и `git diff --check` самому (отчёту воркера не доверять).
-23. Ревью по [review-checklist.md](review-checklist.md) → вердикт `ACCEPT` или `CHANGES_REQUIRED`.
-24. `CHANGES_REQUIRED` → метка `ai-changes-requested`, вернуть воркеру нумерованный список правок.
+22. Для каждого commit **независимо**: `git show --stat <sha>`, чтение diff.
+23. Запустить `node --test` и `git diff --check` самому (отчёту воркера не доверять).
+24. Ревью по [review-checklist.md](review-checklist.md) → вердикт `ACCEPT` или `CHANGES_REQUIRED`.
+25. `CHANGES_REQUIRED` → метка `ai-changes-requested`, вернуть воркеру нумерованный список правок.
     Максимум две итерации, затем `ai-blocked` + Flagged=Impediment и эскалация.
 
 ## 8. Интеграция
-25. Интегрировать **только ACCEPT-коммиты**. Непринятые остаются в своих worktree.
-26. Прогнать `node --test` на интеграционной ветке целиком.
-27. Создать PR. **Merge не выполнять** — merge делает человек.
+26. Интегрировать **только ACCEPT-коммиты**. Непринятые остаются в своих worktree.
+27. Прогнать `node --test` на интеграционной ветке целиком.
+28. Создать PR. **Merge не выполнять** — merge делает человек.
 
 ## 9. Завершение
-28. Обновить Jira: In Review (`10006`, transition `31`), метка `ai-awaiting-merge`, комментарий с
+29. Обновить Jira: In Review (`10006`, transition `31`), метка `ai-awaiting-merge`, комментарий с
     Run ID, Task ID, Dispatch IDs, ветками, коммитами, результатами тестов, вердиктом и PR URL.
     Done (`10008`) — только после подтверждённого merge, то есть в отдельном последующем run.
-29. **Освободить worker terminals** после settlement каждого dispatch.
-30. Проверить, что не осталось dispatch в состоянии `pending` или `unknown`.
+30. **Освободить worker terminals** после settlement каждого dispatch.
+31. Проверить, что не осталось dispatch в состоянии `pending` или `unknown`.
     Любой неразрешённый dispatch — не завершать run: либо довести до settlement, либо `ai-blocked` и эскалация.
