@@ -256,8 +256,44 @@ describe('searchByLabels', () => {
     const jql = urlParams.get('jql');
     assert.ok(jql);
     assert.ok(jql.includes('project = "KAN"'), `JQL should contain project KAN: ${jql}`);
-    assert.ok(jql.includes('"bug"') && jql.includes('"urgent"'), `JQL should contain all labels: ${jql}`);
+    // conjunctive: each label is a separate `labels = "..."` joined by AND
+    assert.ok(jql.includes('labels = "bug"') && jql.includes('labels = "urgent"'), `JQL should contain conjunctive label conditions: ${jql}`);
+    // no "in (" syntax
+    assert.ok(!jql.includes('label in ('), `JQL must not use "label in (" syntax: ${jql}`);
+    assert.ok(!jql.includes(' in ('), `JQL must not use " in (" syntax: ${jql}`);
+    // both labels present with AND between them
+    const bugIdx = jql.indexOf('labels = "bug"');
+    const urgentIdx = jql.indexOf('labels = "urgent"');
+    assert.ok(bugIdx >= 0 && urgentIdx > bugIdx, 'both label conditions must appear in order');
+    assert.ok(jql.includes('AND'), 'JQL must join conditions with AND');
     assert.strictEqual(lastOpts.method, 'GET');
+
+    // fields and maxResults must be set
+    const fields = urlParams.get('fields');
+    assert.ok(fields, 'URL must contain a fields parameter');
+    assert.ok(fields.includes('summary') && fields.includes('status') && fields.includes('labels'),
+      `fields must include summary,status,labels: ${fields}`);
+    const maxResults = urlParams.get('maxResults');
+    assert.ok(maxResults, 'URL must contain a maxResults parameter');
+  });
+
+  it('empty labels produce a project-only JQL without dangling AND', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = { issues: [] };
+    let lastUrl = null;
+    const fetchImpl = (url, init) => {
+      lastUrl = url;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+    };
+
+    await searchByLabels({ creds, labels: [], project: 'KAN', fetchImpl });
+
+    const urlParams = new URLSearchParams(new URL(lastUrl).search);
+    const jql = urlParams.get('jql');
+    assert.ok(jql);
+    // must NOT end with 'AND' or contain a trailing 'AND '
+    assert.ok(!/AND\s*$/.test(jql), `JQL must not end with dangling AND: ${jql}`);
+    assert.strictEqual(jql, 'project = "KAN" ORDER BY created ASC');
   });
 
   it('throws SOURCE_UNAVAILABLE on 410 Gone', async () => {

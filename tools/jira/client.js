@@ -198,6 +198,8 @@ async function _post({ site, email, token, path: endpoint, body, fetchImpl }) {
   return response.json();
 }
 
+const DEFAULT_MAX_RESULTS = 50;
+
 /**
  * Search for issues by a set of labels within a project.
  * Returns issues sorted by creation date ascending.
@@ -213,8 +215,18 @@ async function _post({ site, email, token, path: endpoint, body, fetchImpl }) {
  */
 export async function searchByLabels({ creds, labels, project, fetchImpl }) {
   const fetcher = fetchImpl || fetch;
-  const labelClause = labels.map((l) => `"${l}"`).join(',');
-  const jql = `project = "${project}" AND label in (${labelClause}) ORDER BY created ASC`;
+
+  const escape = (v) => v.replace(/"/g, '\\"');
+  const labelConditions = labels.map((l) => `labels = "${escape(l)}"`);
+  let jql = `project = "${escape(project)}"`;
+  if (labelConditions.length > 0) {
+    jql += ` AND ${labelConditions.join(' AND ')}`;
+  }
+  jql += ' ORDER BY created ASC';
+
+  const params = new URLSearchParams({ jql });
+  params.set('fields', 'summary,status,labels');
+  params.set('maxResults', String(DEFAULT_MAX_RESULTS));
 
   const data = /** @type {{ issues: Array<{ key: string, fields: any }> }} */ (
     await _get({
@@ -222,7 +234,7 @@ export async function searchByLabels({ creds, labels, project, fetchImpl }) {
       email: creds.email,
       token: creds.token,
       path: '/search/jql',
-      searchParams: new URLSearchParams({ jql }),
+      searchParams: params,
       fetchImpl: fetcher,
     })
   );
