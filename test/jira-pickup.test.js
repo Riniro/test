@@ -52,15 +52,12 @@ function writeCredsFile(dir, site) {
 
 function runSpawn(scriptPath, args, env, timeoutMs = 10000) {
   return new Promise((resolve) => {
-    const ch = spawn(process.execPath, [scriptPath, ...args], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGTERM' });
-    const out = [], serr = [];
-    let settled = false;
-    const settle = (result) => { if (!settled) { settled = true; resolve(result); } };
-    const t = setTimeout(() => { ch.kill(); settle({ status: null, stdout: 'timeout', stderr: 'timeout' }); }, timeoutMs);
-    ch.stdout.on('data', (d) => { out.push(d); });
-    ch.stderr.on('data', (d) => { serr.push(d); });
-    ch.on('close', (code) => { clearTimeout(t); settle({ status: code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(serr).toString('utf8') }); });
-    ch.on('error', () => { clearTimeout(t); settle({ status: null, stdout: '', stderr: 'spawn error' }); });
+    const cmd = `"${process.execPath}" "${scriptPath}"${args.length ? ' ' + args.map(a => JSON.stringify(a)).join(' ') : ''}`;
+    const ch = exec(cmd, { cwd: REPO_ROOT, env, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      const status = err ? err.code : 0;
+      resolve({ status, stdout: stdout || '', stderr: stderr || '' });
+    });
+    ch.on('error', () => resolve({ status: null, stdout: '', stderr: 'spawn error' }));
   });
 }
 
