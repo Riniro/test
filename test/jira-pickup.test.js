@@ -892,6 +892,9 @@ describe('CLI process tests', () => {
     const markOut = JSON.parse(markResult.stdout);
     assert.strictEqual(markOut.stored, true);
 
+    let jiraDir1 = null;
+    let jiraDir2 = null;
+
     try {
       // Phase 2a: same run ci-1 fails → should be suppressed (existing behaviour)
       const stubPath1 = path.join(tmpDir, 'gh1.js');
@@ -922,7 +925,7 @@ describe('CLI process tests', () => {
         }
       });
       const port1 = srv1.address().port;
-      const jiraDir1 = mkTempDir('pick-r1j');
+      jiraDir1 = mkTempDir('pick-r1j');
       const credPath1 = writeCredsFile(jiraDir1, `http://127.0.0.1:${port1}`);
       const env1 = {
         ...process.env,
@@ -967,7 +970,7 @@ describe('CLI process tests', () => {
         }
       });
       const port2 = srv2.address().port;
-      const jiraDir2 = mkTempDir('pick-r1j2');
+      jiraDir2 = mkTempDir('pick-r1j2');
       const credPath2 = writeCredsFile(jiraDir2, `http://127.0.0.1:${port2}`);
       const env2 = {
         ...process.env,
@@ -986,6 +989,8 @@ describe('CLI process tests', () => {
     } finally {
       cleanup(tmpDir);
       cleanup(stateDir);
+      if (jiraDir1) cleanup(jiraDir1);
+      if (jiraDir2) cleanup(jiraDir2);
     }
   });
 
@@ -1005,6 +1010,8 @@ describe('CLI process tests', () => {
     assert.strictEqual(markResult.status, 0);
     const markOut = JSON.parse(markResult.stdout);
     assert.strictEqual(markOut.stored, true);
+
+    let jiraDir = null;
 
     try {
       // GH stub: merged PR with failed check run ci-1 (already handled)
@@ -1039,7 +1046,7 @@ describe('CLI process tests', () => {
         }
       });
       const port = srv.address().port;
-      const jiraDir = mkTempDir('pick-r2j');
+      jiraDir = mkTempDir('pick-r2j');
       const credPath = writeCredsFile(jiraDir, `http://127.0.0.1:${port}`);
       const env = {
         ...process.env,
@@ -1060,6 +1067,7 @@ describe('CLI process tests', () => {
     } finally {
       cleanup(tmpDir);
       cleanup(stateDir);
+      if (jiraDir) cleanup(jiraDir);
     }
   });
 
