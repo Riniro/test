@@ -208,8 +208,14 @@ describe('claim.js CLI', () => {
         }));
       } else {
         await drainBody(req);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        // Verify correct method (PUT for setLabels, POST for transition)
+        if (req.method === 'PUT' || req.method === 'POST') {
+          res.writeHead(204);
+          res.end();
+        } else {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'method not allowed' }));
+        }
       }
     });
     const port = srv.address().port;
@@ -244,8 +250,13 @@ describe('claim.js CLI', () => {
         }));
       } else {
         await drainBody(req);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        if (req.method === 'PUT' || req.method === 'POST') {
+          res.writeHead(204);
+          res.end();
+        } else {
+          res.writeHead(405, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'method not allowed' }));
+        }
       }
     });
     const port = srv.address().port;
@@ -311,8 +322,8 @@ describe('claim.js CLI', () => {
       } else {
         await drainBody(req);
         srv._mutated = true;
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        res.writeHead(204);
+        res.end();
       }
     });
     const port = srv.address().port;
@@ -352,8 +363,8 @@ describe('claim.js CLI', () => {
       } else {
         await drainBody(req);
         mutationCount++;
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        res.writeHead(204);
+        res.end();
       }
     });
     const port = srv.address().port;
@@ -398,8 +409,8 @@ describe('claim.js CLI', () => {
       } else {
         await drainBody(req);
         mutationCalled = true;
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        res.writeHead(204);
+        res.end();
       }
     });
     const port = srv.address().port;
@@ -443,8 +454,8 @@ describe('claim.js CLI', () => {
         }));
       } else {
         await drainBody(req);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{}');
+        res.writeHead(204);
+        res.end();
       }
     });
     const port = srv.address().port;
@@ -465,7 +476,7 @@ describe('claim.js CLI', () => {
   });
 
   // ------------------------------------------------------------------------
-  // Cleanup: ensure no temp dirs remain after full test run
+  // Cleanup
   // ------------------------------------------------------------------------
   after(() => {
     // This after hook runs after all tests; no temp dirs to clean

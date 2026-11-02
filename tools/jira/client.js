@@ -162,6 +162,9 @@ async function _put({ site, email, token, path: endpoint, body, fetchImpl }) {
   }
 
   await _handleResponse(null, response);
+  if (response.status === 204) {
+    return null;
+  }
   return response.json();
 }
 
@@ -195,6 +198,9 @@ async function _post({ site, email, token, path: endpoint, body, fetchImpl }) {
   }
 
   await _handleResponse(null, response);
+  if (response.status === 204) {
+    return null;
+  }
   return response.json();
 }
 
@@ -297,7 +303,7 @@ export async function getIssue({ creds, key, fetchImpl }) {
  */
 export async function setLabels({ creds, key, labels, fetchImpl }) {
   const fetcher = fetchImpl || fetch;
-  await _post({
+  await _put({
     site: creds.site,
     email: creds.email,
     token: creds.token,
