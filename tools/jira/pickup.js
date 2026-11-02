@@ -340,6 +340,17 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
   const runs = await fetchCheckRunsForSha(prData.mergeCommit, repo, opts.env);
   const ciStatus = parseCheckRuns(runs);
 
+  // Collect the first completed check-run id for stored-failure tracking.
+  let ciRunId = null;
+  if (ciStatus === 'failed') {
+    for (const run of runs) {
+      if (run.status === 'completed' && run.id) {
+        ciRunId = String(run.id);
+        break;
+      }
+    }
+  }
+
   const status = determinePrStatus({
     prState: 'MERGED',
     mergedAt: prData.mergedAt,
@@ -357,6 +368,7 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
     err: null,
     ciStatus,
     work: status.work,
+    ciRunId,
   };
 }
 
@@ -371,14 +383,32 @@ export function applyCiFailurePolicy(result, env, repo) {
   if (result.reason !== 'closing_ci_failed' || !result.pr) return result;
 
   const state = readPickupState(env);
-  // The PR info from evaluatePrData contains number and mergeCommit but not ciRunId.
-  // The ciRunId would be passed explicitly for stored records.
-  // For initial detection we don't have it — just return the failure.
-  // The mark-handled flow will add the record.
+  const issueKey = result.issue ? result.issue.key : '';
+  const prNum = result.pr.number;
+  const mergeSha = result.pr.mergeCommit || '';
 
-  const stored = findStoredFailure(state, repo, result.issue ? result.issue.key : '', result.pr.number, result.pr.mergeCommit || '', 'unknown');
+  // Try to find a matching stored failure.  Match by the four core
+  // fields (repo, issue, pr, mergeSha) — the ciRun is the field that
+  // was mismatched before (hardcoded 'unknown' vs actual --ci-run).
+  // Now that we pass the real ciRunId we must match on it too.
+  // But for the common case where we don't yet have a ciRunId
+  // (first pass, no check-run id available), fall back to matching
+  // any record with the same repo+issue+pr+mergeSha.
+  let stored = null;
+  if (result.ciRunId) {
+    stored = findStoredFailure(state, repo, issueKey, prNum, mergeSha, result.ciRunId);
+  }
+  if (!stored) {
+    for (const r of (state?.records || [])) {
+      if (r.key === repo + '|||' + issueKey && r.pr === prNum && r.mergeSha === mergeSha) {
+        stored = r;
+        break;
+      }
+    }
+  }
+
   if (stored) {
-    return { ...result, reason: 'closing_ci_failed_handled', exitCode: 3 };
+    return { ...result, work: false, reason: 'closing_ci_failed_handled', exitCode: 3 };
   }
   return { ...result, exitCode: 0 };
 }
@@ -439,13 +469,13 @@ export async function main({ argv, env } = {}) {
 
   // --- mark-handled subcommand ---
   if (args.sub === 'mark-handled') {
-    if (!args.mRepo || !args.mIssue || args.mPr === null || !args.mMergeSha || !args.mCiRun) {
+    if (!args.repo || !args.mIssue || args.mPr === null || !args.mMergeSha || !args.mCiRun) {
       process.stderr.write('Usage: node pickup.js mark-handled --repo <r> --issue <k> --pr <n> --merge-sha <s> --ci-run <id>\n');
       process.exitCode = 2;
       return;
     }
-    addStoredFailure(e, args.mRepo, args.mIssue, args.mPr, args.mMergeSha, args.mCiRun);
-    process.stdout.write(JSON.stringify({ stored: true, repo: args.mRepo, issue: args.mIssue, pr: args.mPr }) + '\n');
+    addStoredFailure(e, args.repo, args.mIssue, args.mPr, args.mMergeSha, args.mCiRun);
+    process.stdout.write(JSON.stringify({ stored: true, repo: args.repo, issue: args.mIssue, pr: args.mPr }) + '\n');
     process.exitCode = 0;
     return;
   }
@@ -522,8 +552,6 @@ export async function main({ argv, env } = {}) {
         return;
       }
 
-      if (!ev.matched) continue; // no PR for this issue
-
       if (ev.prUnclear && !result) {
         result = {
           work: false, reason: 'pr_unclear',
@@ -534,6 +562,8 @@ export async function main({ argv, env } = {}) {
         };
         continue;
       }
+
+      if (!ev.matched) continue; // no PR for this issue
 
       if (ev.prInfo) {
         result = {
