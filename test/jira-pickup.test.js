@@ -910,10 +910,16 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv1, close: cs1 } = await startServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
-        }));
+        const url = req.url || '';
+        if (url.includes('ai-ready')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ issues: [] }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+          }));
+        }
       });
       const port1 = srv1.address().port;
       const jiraDir1 = mkTempDir('pick-r1j');
@@ -949,10 +955,16 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv2, close: cs2 } = await startServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
-        }));
+        const url = req.url || '';
+        if (url.includes('ai-ready')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ issues: [] }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+          }));
+        }
       });
       const port2 = srv2.address().port;
       const jiraDir2 = mkTempDir('pick-r1j2');

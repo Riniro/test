@@ -378,6 +378,7 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
 
 /**
  * Apply single-processing logic for closing_ci_failed.
+ * Matches stored failures by all five fields: repo, issue, pr, mergeSha, ciRun.
  */
 export function applyCiFailurePolicy(result, env, repo) {
   if (result.reason !== 'closing_ci_failed' || !result.pr) return result;
@@ -387,25 +388,9 @@ export function applyCiFailurePolicy(result, env, repo) {
   const prNum = result.pr.number;
   const mergeSha = result.pr.mergeCommit || '';
 
-  // Try to find a matching stored failure.  Match by the four core
-  // fields (repo, issue, pr, mergeSha) — the ciRun is the field that
-  // was mismatched before (hardcoded 'unknown' vs actual --ci-run).
-  // Now that we pass the real ciRunId we must match on it too.
-  // But for the common case where we don't yet have a ciRunId
-  // (first pass, no check-run id available), fall back to matching
-  // any record with the same repo+issue+pr+mergeSha.
-  let stored = null;
-  if (result.ciRunId) {
-    stored = findStoredFailure(state, repo, issueKey, prNum, mergeSha, result.ciRunId);
-  }
-  if (!stored) {
-    for (const r of (state?.records || [])) {
-      if (r.key === repo + '|||' + issueKey && r.pr === prNum && r.mergeSha === mergeSha) {
-        stored = r;
-        break;
-      }
-    }
-  }
+  const stored = findStoredFailure(
+    state, repo, issueKey, prNum, mergeSha, result.ciRunId
+  );
 
   if (stored) {
     return { ...result, work: false, reason: 'closing_ci_failed_handled', exitCode: 3 };
@@ -573,6 +558,7 @@ export async function main({ argv, env } = {}) {
           pr: ev.prInfo,
           counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length },
           exitCode: (ev.work) ? 0 : (ev.reason === 'closing_ci_stuck' || ev.reason === 'pr_unclear' ? 4 : 3),
+          ciRunId: ev.ciRunId,
         };
         break;
       }
@@ -580,17 +566,22 @@ export async function main({ argv, env } = {}) {
       // matched but no prInfo (no mergedAt / mergeCommit) — skip this issue
     }
 
-    // If we found a closeable item in awaiting-merge, return it immediately
+    // If we found a closeable item in awaiting-merge, apply the CI-failure policy.
+    // After the policy, a non-closeable result (work: false) does NOT block
+    // new work — continue to the ready check.
+    if (result && result.work && result.reason === 'closing_ci_failed') {
+      result = applyCiFailurePolicy(result, e, args.repo);
+    }
+
+    // If the result is still closeable, return it immediately
     if (result && result.work) {
-      if (result.reason === 'closing_ci_failed') {
-        result = applyCiFailurePolicy(result, e, args.repo);
-      }
       printResult(result);
       return;
     }
 
-    // Non-closeable matched PRs (awaiting_merge, closing_ci_pending) do NOT block
-    // new work — "открытый PR не блокирует подхват другой готовой работы"
+    // Non-closeable matched PRs (awaiting_merge, closing_ci_pending,
+    // closing_ci_failed_handled) do NOT block new work — "открытый PR
+    // не блокирует подхват другой готовой работы"
     // Continue to ready check.
 
     // If awaiting-merge produced pr_unclear or unavailable, return immediately
