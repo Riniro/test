@@ -876,6 +876,182 @@ describe('CLI process tests', () => {
   });
 
   // ------------------------------------------------------------------------
+  // Regression 1 — handled failure for one CI run must not suppress a different run
+  // ------------------------------------------------------------------------
+  test('handled failure ci-1 must not suppress different run ci-2', async () => {
+    const tmpDir = mkTempDir('pick-r1');
+
+    // Phase 1: mark ci-1 as handled
+    const stateDir = mkTempDir('pick-r1s');
+    const envMark = { ...process.env, COORDINATOR_STATE_DIR: stateDir };
+    const markResult = await runSpawn(CLI, [
+      'mark-handled', '--repo', 'Riniro/test', '--issue', 'KAN-14',
+      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', 'ci-1',
+    ], envMark, 10000);
+    assert.strictEqual(markResult.status, 0);
+    const markOut = JSON.parse(markResult.stdout);
+    assert.strictEqual(markOut.stored, true);
+
+    try {
+      // Phase 2a: same run ci-1 fails → should be suppressed (existing behaviour)
+      const stubPath1 = path.join(tmpDir, 'gh1.js');
+      fs.writeFileSync(stubPath1, [
+        'const a=process.argv.slice(2).join(" ");',
+        'if (a.includes("pr list")) {',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '} else if (a.includes("pr view")) {',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '} else if (a.includes("check-runs")) {',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-1","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '} else {',
+        '  process.stdout.write("[]"+ "\\n");',
+        '}',
+        'process.exit(0);',
+      ].join('\n'));
+
+      const { server: srv1, close: cs1 } = await startServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+        }));
+      });
+      const port1 = srv1.address().port;
+      const jiraDir1 = mkTempDir('pick-r1j');
+      const credPath1 = writeCredsFile(jiraDir1, `http://127.0.0.1:${port1}`);
+      const env1 = {
+        ...process.env,
+        JIRA_CREDENTIALS_FILE: credPath1,
+        COORDINATOR_STATE_DIR: stateDir,
+        PICKUP_GH_EXEC: stubPath1,
+        PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      };
+      const r1 = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env1, 10000);
+      await cs1();
+      assert.strictEqual(r1.status, 3);
+      const out1 = JSON.parse(r1.stdout);
+      assert.strictEqual(out1.reason, 'closing_ci_failed_handled');
+      assert.strictEqual(out1.work, false);
+
+      // Phase 2b: different run ci-2 fails → should NOT be suppressed
+      const stubPath2 = path.join(tmpDir, 'gh2.js');
+      fs.writeFileSync(stubPath2, [
+        'const a=process.argv.slice(2).join(" ");',
+        'if (a.includes("pr list")) {',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '} else if (a.includes("pr view")) {',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '} else if (a.includes("check-runs")) {',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-2","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '} else {',
+        '  process.stdout.write("[]"+ "\\n");',
+        '}',
+        'process.exit(0);',
+      ].join('\n'));
+
+      const { server: srv2, close: cs2 } = await startServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+        }));
+      });
+      const port2 = srv2.address().port;
+      const jiraDir2 = mkTempDir('pick-r1j2');
+      const credPath2 = writeCredsFile(jiraDir2, `http://127.0.0.1:${port2}`);
+      const env2 = {
+        ...process.env,
+        JIRA_CREDENTIALS_FILE: credPath2,
+        COORDINATOR_STATE_DIR: stateDir,
+        PICKUP_GH_EXEC: stubPath2,
+        PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      };
+      const r2 = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env2, 10000);
+      await cs2();
+      // This assertion will fail on current code: bug returns closing_ci_failed_handled
+      assert.strictEqual(r2.status, 0);
+      const out2 = JSON.parse(r2.stdout);
+      assert.strictEqual(out2.reason, 'closing_ci_failed');
+      assert.strictEqual(out2.work, true);
+    } finally {
+      cleanup(tmpDir);
+      cleanup(stateDir);
+    }
+  });
+
+  // ------------------------------------------------------------------------
+  // Regression 2 — handled failure must not block picking ready work
+  // ------------------------------------------------------------------------
+  test('handled failure must not block ready pickup', async () => {
+    const tmpDir = mkTempDir('pick-r2');
+
+    // Phase 1: mark ci-1 as handled
+    const stateDir = mkTempDir('pick-r2s');
+    const envMark = { ...process.env, COORDINATOR_STATE_DIR: stateDir };
+    const markResult = await runSpawn(CLI, [
+      'mark-handled', '--repo', 'Riniro/test', '--issue', 'KAN-14',
+      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', 'ci-1',
+    ], envMark, 10000);
+    assert.strictEqual(markResult.status, 0);
+    const markOut = JSON.parse(markResult.stdout);
+    assert.strictEqual(markOut.stored, true);
+
+    try {
+      // GH stub: merged PR with failed check run ci-1 (already handled)
+      const stubPath = path.join(tmpDir, 'gh.js');
+      fs.writeFileSync(stubPath, [
+        'const a=process.argv.slice(2).join(" ");',
+        'if (a.includes("pr list")) {',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '} else if (a.includes("pr view")) {',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '} else if (a.includes("check-runs")) {',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-1","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '} else {',
+        '  process.stdout.write("[]"+ "\\n");',
+        '}',
+        'process.exit(0);',
+      ].join('\n'));
+
+      // Jira stub: ai-ready returns KAN-99, ai-awaiting-merge returns KAN-14
+      const { server: srv, close: cs } = await startServer((req, res) => {
+        const url = req.url || '';
+        if (url.includes('ai-ready')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            issues: [{ key: 'KAN-99', fields: { summary: 'Ready task', labels: ['project-test', 'ai-ready'] } }],
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+          }));
+        }
+      });
+      const port = srv.address().port;
+      const jiraDir = mkTempDir('pick-r2j');
+      const credPath = writeCredsFile(jiraDir, `http://127.0.0.1:${port}`);
+      const env = {
+        ...process.env,
+        JIRA_CREDENTIALS_FILE: credPath,
+        COORDINATOR_STATE_DIR: stateDir,
+        PICKUP_GH_EXEC: stubPath,
+        PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 10000);
+      await cs();
+      // This assertion will fail on current code: bug returns closing_ci_failed_handled with work=false
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.work, true);
+      assert.strictEqual(out.reason, 'ready');
+      assert.ok(out.issue);
+      assert.strictEqual(out.issue.key, 'KAN-99');
+    } finally {
+      cleanup(tmpDir);
+      cleanup(stateDir);
+    }
+  });
+
+  // ------------------------------------------------------------------------
   // Invariant: awaitingMerge > 0 ⇒ reason !== 'none'
   // ------------------------------------------------------------------------
   test('invariant awaitingMerge > 0 ⇒ reason is not none', async () => {
