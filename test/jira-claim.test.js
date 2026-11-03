@@ -513,7 +513,7 @@ describe('claim.js CLI', () => {
       assert.strictEqual(r.status, 0);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, true);
-      assert.strictEqual(out.reason, 'claimed');
+      assert.strictEqual(out.reason, 'review_pending');
       assert.strictEqual(out.adopted, true);
       assert.strictEqual(out.state, 'review_pending');
       assert.strictEqual(out.mode, 'review');
@@ -606,6 +606,598 @@ describe('claim.js CLI', () => {
         'PUT /rest/api/2/issue/KAN-1',
         'GET /rest/api/2/issue/KAN-1',
       ]);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // ==========================================================================
+  // Acceptance criteria — 11 tests per the change contract
+  // ==========================================================================
+
+  // AC1: ai-blocked + ai-ready, PR нет, без флага → код 3, state: "blocked"
+  test('AC1: ai-blocked + ai-ready, no PR → code 3, state: blocked', async () => {
+    const gh = mkTempDir('ac1');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    const { server: srv, close: cs } = await startServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready', 'ai-blocked'] },
+      }));
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 3);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'blocked');
+      assert.strictEqual(out.state, 'blocked');
+
+      // Jira stub received only the issue read; no gh calls at all.
+      const calls = [];
+      // We don't have a jira-log in this test, but gh-log should be empty.
+      assert.strictEqual(fs.existsSync(logPath), false, 'gh stub should not have been called');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC2: ai-blocked + открытый PR + --adopt-existing → код 3, state: "blocked", ноль мутаций
+  test('AC2: ai-blocked + open PR + --adopt-existing → code 3, blocked, zero mutations', async () => {
+    const gh = mkTempDir('ac2');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write(JSON.stringify([{ number: 42, state: "OPEN", title: "[KAN-1] Fix bug" }]) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCount = 0;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready', 'ai-blocked'] },
+        }));
+      } else {
+        await drainBody(req);
+        mutationCount++;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 3);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'blocked');
+      assert.strictEqual(out.state, 'blocked');
+      assert.strictEqual(mutationCount, 0, 'ai-blocked must prevent any Jira mutations');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC3: PR найден, флага нет → код 4, state: "work_exists", ноль мутаций Jira
+  test('AC3: PR found, no --adopt-existing → code 4, work_exists, zero mutations', async () => {
+    const gh = mkTempDir('ac3');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    let mutationCount = 0;
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write(JSON.stringify([{ number: 42, state: "OPEN", title: "[KAN-1] Fix bug" }]) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+        }));
+      } else {
+        await drainBody(req);
+        mutationCount++;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 4);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'work_exists');
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(mutationCount, 0, 'work_exists without --adopt-existing must not mutate Jira');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC4: Влитый PR + --adopt-existing, метка ai-awaiting-merge была → код 0, state: "closing", mode: "close", labelsAfter содержит ai-awaiting-merge
+  test('AC4: merged PR + --adopt-existing, ai-awaiting-merge present → code 0, closing, mode close, label preserved', async () => {
+    const gh = mkTempDir('ac4');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write(JSON.stringify([{ number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" }]) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready', 'ai-awaiting-merge'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-awaiting-merge'] },
+          }));
+        }
+      } else {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.state, 'closing');
+      assert.strictEqual(out.mode, 'close');
+      assert.strictEqual(out.reason, 'closing');
+      assert.deepStrictEqual(out.labelsAfter, ['project-test', 'ai-awaiting-merge']);
+      assert.ok(out.labelsAfter.includes('ai-awaiting-merge'), 'ai-awaiting-merge must be preserved in labelsAfter');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC5: Влитый PR + --adopt-existing, метки ai-awaiting-merge не было → код 0, метка поставлена
+  test('AC5: merged PR + --adopt-existing, no ai-awaiting-merge → code 0, label set', async () => {
+    const gh = mkTempDir('ac5');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write(JSON.stringify([{ number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" }]) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-awaiting-merge'] },
+          }));
+        }
+      } else {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.state, 'closing');
+      assert.strictEqual(out.mode, 'close');
+      assert.deepStrictEqual(out.labelsAfter, ['project-test', 'ai-awaiting-merge']);
+      assert.ok(out.labelsAfter.includes('ai-awaiting-merge'), 'ai-awaiting-merge must be set when absent');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC6: PUT меток вернул 500 → код 7, state: mutation_failed; после PUT чтения задачи не было
+  test('AC6: PUT labels returns 500 → code 7, mutation_failed, no readback after PUT', async () => {
+    const gh = mkTempDir('ac6');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]" + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+        }));
+        return;
+      }
+      await drainBody(req);
+      if (req.method === 'PUT') {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 7);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'mutation_failed');
+
+      // Call sequence: GET issue, PUT labels (500), then NO GET.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
+        'GET /rest/api/2/issue/KAN-1',
+        'PUT /rest/api/2/issue/KAN-1',
+      ]);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC7: PUT прошёл, readback вернул старые метки → код 5, state: readback_failed
+  test('AC7: PUT ok but readback returns old labels → code 5, readback_failed', async () => {
+    const gh = mkTempDir('ac7');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]" + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        // Always returns ai-ready (mutation didn't stick)
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+        }));
+        return;
+      }
+      await drainBody(req);
+      if (req.method === 'PUT') {
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 5);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'readback_failed');
+
+      // Full sequence: GET issue, PUT, GET readback.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
+        'GET /rest/api/2/issue/KAN-1',
+        'PUT /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1',
+      ]);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC8: --transition-id без --expect-status → код 2, state: usage, ноль запросов к Jira
+  test('AC8: --transition-id without --expect-status → code 2, usage, zero Jira requests', async () => {
+    const gh = mkTempDir('ac8');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCount = 0;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+        }));
+      } else {
+        await drainBody(req);
+        mutationCount++;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--transition-id', '5'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 2);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'usage');
+      assert.strictEqual(mutationCount, 0, 'usage error must not send any Jira requests');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC9: --transition-id с --expect-status, статус не совпал → код 5, state: readback_failed
+  test('AC9: transition with --expect-status, status mismatch → code 5, readback_failed', async () => {
+    const gh = mkTempDir('ac9');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]" + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+          }));
+        } else {
+          // After transition: status is "In Progress", not "Done"
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'In Progress' }, labels: ['project-test'] },
+          }));
+        }
+        return;
+      }
+      await drainBody(req);
+      if (req.method === 'PUT') {
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--transition-id', '5', '--expect-status', 'Done'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 5);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'readback_failed');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC10: --transition-id с --expect-status, статус совпал → код 0, state: claimed
+  test('AC10: transition with --expect-status, status matches → code 0, state: claimed', async () => {
+    const gh = mkTempDir('ac10');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]" + "\\n");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready'] },
+          }));
+        } else {
+          // After transition: status matches expected "Done"
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'Done' }, labels: ['project-test'] },
+          }));
+        }
+        return;
+      }
+      await drainBody(req);
+      if (req.method === 'PUT') {
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--transition-id', '5', '--expect-status', 'Done'], { ...env, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.state, 'claimed');
+      assert.strictEqual(out.reason, 'claimed');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC11: Открытый PR без вердикта + --adopt-existing → код 0, state: review_pending, reason: review_pending, mode: review, labelsAfter содержит ai-in-review
+  test('AC11: open PR without verdict + --adopt-existing → code 0, review_pending, reason review_pending, mode review, ai-in-review set', async () => {
+    const gh = mkTempDir('ac11');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "abc123def456",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ])};
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.reason, 'review_pending');
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.mode, 'review');
+      assert.ok(out.labelsAfter.includes('ai-in-review'), 'ai-in-review must be in labelsAfter');
     } finally {
       await cs();
       cleanup(gh);

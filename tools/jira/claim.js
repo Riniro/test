@@ -28,6 +28,7 @@ function parseArgs(argv) {
     issue: null,
     repo: null,
     transitionId: null,
+    expectStatus: null,
     adoptExisting: false,
   };
   let i = 0;
@@ -37,6 +38,7 @@ function parseArgs(argv) {
     if (x === '--issue' && i + 1 < argv.length) { a.issue = argv[++i]; i++; continue; }
     if (x === '--repo' && i + 1 < argv.length) { a.repo = argv[++i]; i++; continue; }
     if (x === '--transition-id' && i + 1 < argv.length) { a.transitionId = argv[++i]; i++; continue; }
+    if (x === '--expect-status' && i + 1 < argv.length) { a.expectStatus = argv[++i]; i++; continue; }
     if (x === '--adopt-existing') { a.adoptExisting = true; i++; continue; }
     i++;
   }
@@ -198,6 +200,10 @@ export async function main({ argv, env } = {}) {
     exitJson(2, { success: false, reason: 'usage' });
   }
 
+  if (args.transitionId && !args.expectStatus) {
+    exitJson(2, { success: false, reason: 'usage' });
+  }
+
   // --- Load credentials ---
   let creds;
   try {
@@ -227,6 +233,12 @@ export async function main({ argv, env } = {}) {
 
   if (!issue) {
     exitJson(2, { success: false, reason: 'not_found' });
+  }
+
+  // --- Check ai-blocked: before any PR search or mutation ---
+  if ((issue.fields && issue.fields.labels && issue.fields.labels.includes('ai-blocked')) ||
+      (issue.labels && issue.labels.includes('ai-blocked'))) {
+    exitJson(3, { success: false, reason: 'blocked', state: 'blocked' });
   }
 
   // --- Step 2: Check existing work BEFORE any mutations ---
@@ -270,10 +282,10 @@ export async function main({ argv, env } = {}) {
       await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
       setResult = { ok: true };
     } catch (err) {
-      if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
+      if (err.code === 'AUTH_FAILED') {
         exitJson(6, { success: false, reason: 'source_unavailable' });
       }
-      exitJson(5, { success: false, reason: 'readback_failed' });
+      exitJson(7, { success: false, reason: 'mutation_failed' });
     }
 
     // Readback
@@ -311,10 +323,21 @@ export async function main({ argv, env } = {}) {
       } catch {
         exitJson(5, { success: false, reason: 'readback_failed' });
       }
+
+      // If --expect-status was given, verify the actual status matches.
+      if (args.expectStatus) {
+        const actualName = typeof issueReadback.status === 'string'
+          ? issueReadback.status
+          : (issueReadback.status && issueReadback.status.name) || '';
+        if (actualName.trim().toLowerCase() !== args.expectStatus.trim().toLowerCase()) {
+          exitJson(5, { success: false, reason: 'readback_failed' });
+        }
+      }
     }
 
     exitJson(0, {
       success: true,
+      reason: 'claimed',
       key: args.issue,
       summary: issueReadback.summary || '',
       labelsBefore: labelsBefore,
@@ -344,9 +367,9 @@ export async function main({ argv, env } = {}) {
     // We can compute state/mode/readiness from the PR data alone.
 
     // For OPEN PR: state=review_pending, mode=review (before we check readiness)
-    // For MERGED PR: state=merged, mode=close
+    // For MERGED PR: state=closing, mode=close
     if (foundPr.state === 'MERGED') {
-      state = 'merged';
+      state = 'closing';
       mode = 'close';
     } else {
       state = 'review_pending';
@@ -440,7 +463,7 @@ export async function main({ argv, env } = {}) {
   let removeLabels;
 
   if (foundPr.state === 'MERGED') {
-    state = 'merged';
+    state = 'closing';
     mode = 'close';
     targetLabel = 'ai-awaiting-merge';
     removeLabels = ['ai-ready', 'ai-in-review'];
@@ -469,7 +492,7 @@ export async function main({ argv, env } = {}) {
   // If review_pending, exit code 0 (continue processing)
   // ----------------------------------------------------------------
   let exitCode;
-  if (state === 'merged') {
+  if (state === 'closing') {
     exitCode = 0;
   } else if (state === 'awaiting_merge') {
     exitCode = 4;
@@ -490,10 +513,10 @@ export async function main({ argv, env } = {}) {
       add: [targetLabel],
     });
   } catch (err) {
-    if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
+    if (err.code === 'AUTH_FAILED') {
       exitJson(6, { success: false, reason: 'source_unavailable' });
     }
-    exitJson(5, { success: false, reason: 'readback_failed' });
+    exitJson(7, { success: false, reason: 'mutation_failed' });
   }
 
   // ----------------------------------------------------------------
@@ -514,7 +537,7 @@ export async function main({ argv, env } = {}) {
 
   exitJson(exitCode, {
     success: exitCode === 0,
-    reason: exitCode === 0 ? 'claimed' : 'work_exists',
+    reason: state,
     adopted: true,
     state: state,
     mode: mode,
