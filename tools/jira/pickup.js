@@ -517,9 +517,34 @@ export async function main({ argv, env } = {}) {
     if (awaitingErr || readyErr) {
       const err = awaitingErr || readyErr;
       if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
-        printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: null, ready: null }, exitCode: 4 });
+        printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: null, ready: null, inReview: null }, exitCode: 4 });
         return;
       }
+    }
+
+    // ---- Check ai-in-review phase before ready ----
+    let inReviewIssues = [];
+    let inReviewErr = null;
+    try {
+      inReviewIssues = await mod.searchByLabels({ creds, labels: [args.projectLabel, 'ai-in-review'], project: args.project });
+    } catch (err) { inReviewErr = err; }
+
+    if (inReviewErr) {
+      if (inReviewErr.code === 'AUTH_FAILED' || inReviewErr.code === 'SOURCE_UNAVAILABLE') {
+        printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: null }, exitCode: 4 });
+        return;
+      }
+    }
+
+    if (inReviewIssues.length > 0) {
+      printResult({
+        work: true, reason: 'review',
+        issue: { key: inReviewIssues[0].key, summary: inReviewIssues[0].summary, labels: inReviewIssues[0].labels },
+        pr: null,
+        counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: inReviewIssues.length },
+        exitCode: 0,
+      });
+      return;
     }
 
     // ---- Process awaiting-merge ----

@@ -382,16 +382,27 @@ describe('getIssue', () => {
 // -- setLabels -------------------------------------------------------
 
 describe('setLabels', () => {
-  it('sends a POST with new labels', async () => {
+  it('sends a PUT with new labels', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await setLabels({ creds, key: 'KAN-42', labels: ['new-label', 'another'], fetchImpl });
+    assert.strictEqual(capturedMethod, 'PUT');
     assert.deepStrictEqual(capturedBody, { fields: { labels: ['new-label', 'another'] } });
+  });
+
+  it('returns undefined on 204 No Content', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+
+    const result = await setLabels({ creds, key: 'KAN-42', labels: [], fetchImpl });
+    assert.strictEqual(result, undefined);
   });
 
   it('throws SOURCE_UNAVAILABLE on network error', async () => {
@@ -403,6 +414,23 @@ describe('setLabels', () => {
       (err) => err.code === 'SOURCE_UNAVAILABLE'
     );
   });
+
+  it('fails when server returns 405 for POST — proves setLabels uses PUT', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
+    const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
+      // If the caller tries POST, reject with 405 (Jira behaviour)
+      if (init.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 405, json: () => Promise.resolve({}) });
+      }
+      // Accept the correct method (PUT)
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+    };
+
+    await setLabels({ creds, key: 'KAN-42', labels: ['a'], fetchImpl });
+    assert.strictEqual(capturedMethod, 'PUT');
+  });
 });
 
 // -- transition ------------------------------------------------------
@@ -410,26 +438,40 @@ describe('setLabels', () => {
 describe('transition', () => {
   it('sends a POST with transition id', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await transition({ creds, key: 'KAN-42', transitionId: 5, fetchImpl });
+    assert.strictEqual(capturedMethod, 'POST');
     assert.deepStrictEqual(capturedBody, { transition: { id: '5' } });
   });
 
   it('sends string transitionId as string', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await transition({ creds, key: 'KAN-42', transitionId: 'done', fetchImpl });
+    assert.strictEqual(capturedMethod, 'POST');
     assert.deepStrictEqual(capturedBody, { transition: { id: 'done' } });
+  });
+
+  it('returns undefined on 204 No Content', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+
+    const result = await transition({ creds, key: 'KAN-42', transitionId: 5, fetchImpl });
+    assert.strictEqual(result, undefined);
   });
 
   it('throws SOURCE_UNAVAILABLE on network error', async () => {
