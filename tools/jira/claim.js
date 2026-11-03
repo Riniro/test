@@ -142,16 +142,52 @@ export async function checkCiStatus(headSha, repo, env) {
 // Verdict SHA extraction from comments
 // ==========================================================================
 
-const VERDICT_RE = /^[ \t]*AI-REVIEW-VERDICT:[ \t]*ACCEPT[ \t]+sha=([0-9a-fA-F]{40})[ \t]*$/m;
+const VERDICT_RE = /^AI-REVIEW-VERDICT:\s*(ACCEPT|CHANGES_REQUIRED)\s+sha=([0-9a-fA-F]{40})\s+dispatch=(ctx_[^\s]+)\s+task=(task_[^\s]+)\s+run=(run_[^\s]+)\s*$/;
 
-function extractVerdictSha(comments) {
-  for (const body of comments) {
-    const match = VERDICT_RE.exec(body);
-    if (match) {
-      return match[1]; // 40-char hex sha
+/**
+ * Extract the verdict for the current PR head SHA from comments.
+ *
+ * Rules:
+ * 1. Only consider comments authored by the gate's own account (from getMyself).
+ * 2. Parse the full machine-format string; lines missing any of the three
+ *    identifiers (dispatch, task, run) are ignored entirely.
+ * 3. Among matching lines, select only those whose sha matches the current
+ *    head PR (case-insensitive). Verdicts for other SHA are ignored.
+ * 4. The last matching line in Jira order decides: ACCEPT is positive,
+ *    CHANGES_REQUIRED is negative. An earlier ACCEPT does not override a
+ *    later negative verdict.
+ * 5. If no positive verdict exists → review_pending.
+ * 6. If getMyself or comment fetch failed → review_pending (not an error).
+ *
+ * @param {Array<{ body: string, authorAccountId: string }>} comments — comment objects from getComments.
+ * @param {string} accountId — the gate's own accountId from getMyself.
+ * @param {string} headSha — current PR head SHA.
+ * @returns {{ sha: string | null, verdict: string | null }}
+ */
+function extractVerdictSha(comments, accountId, headSha) {
+  // 1. Filter to comments by the gate's own account
+  const ownComments = comments.filter((c) => c.authorAccountId === accountId);
+
+  // 2. Parse machine-format strings from own comments
+  let lastVerdict = null; // { sha, verdict }
+  for (const c of ownComments) {
+    if (typeof c.body !== 'string') continue;
+    // Search each line in the body
+    const lines = c.body.split('\n');
+    for (const line of lines) {
+      const m = VERDICT_RE.exec(line);
+      if (!m) continue;
+      // m[1] = ACCEPT|CHANGES_REQUIRED, m[2] = sha, m[3] = dispatch, m[4] = task, m[5] = run
+      const verdict = m[1];
+      const sha = m[2];
+      // 3. Only consider matching SHA
+      if (sha.toLowerCase() === headSha.toLowerCase()) {
+        lastVerdict = { sha, verdict };
+      }
     }
   }
-  return null;
+
+  return lastVerdict || { sha: null, verdict: null };
 }
 
 // ==========================================================================
@@ -434,20 +470,24 @@ export async function main({ argv, env } = {}) {
   let ciStatus = null;
   let confirmed = false;
 
-  // Fetch comments to find verdict
+  // Fetch gate's own account and comments to find verdict
+  let accountId = null;
   let comments = [];
   try {
     const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+    const myself = await client.getMyself({ creds });
+    accountId = myself.accountId;
     comments = await client.getComments({ creds, key: args.issue });
   } catch {
-    // Comments unavailable — cannot confirm readiness; falls through to review_pending
+    // getMyself or comments unavailable — cannot confirm readiness; falls through to review_pending
   }
 
-  if (comments.length > 0 && headRefOid) {
-    verdictSha = extractVerdictSha(comments.map((c) => c.body));
-    if (verdictSha) {
+  if (comments.length > 0 && headRefOid && accountId) {
+    const result = extractVerdictSha(comments, accountId, headRefOid);
+    verdictSha = result.sha;
+    if (result.verdict === 'ACCEPT') {
       ciStatus = await checkCiStatus(headRefOid, args.repo, e);
-      if (verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === 'green') {
+      if (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === 'green') {
         confirmed = true;
       }
     }

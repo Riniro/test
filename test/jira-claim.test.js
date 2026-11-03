@@ -522,10 +522,11 @@ describe('claim.js CLI', () => {
       assert.ok(out.pr);
       assert.strictEqual(out.pr.number, 42);
 
-      // Issue, comments (verdict lookup), mutation, readback: in that order.
+      // Issue, myself, comments (verdict lookup), mutation, readback: in that order.
       const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
       assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
         'GET /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/myself',
         'GET /rest/api/2/issue/KAN-1/comment',
         'PUT /rest/api/2/issue/KAN-1',
         'GET /rest/api/2/issue/KAN-1',
@@ -598,10 +599,11 @@ describe('claim.js CLI', () => {
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.reason, 'readback_failed');
 
-      // Issue, comments (verdict lookup), mutation, readback: in that order.
+      // Issue, myself, comments (verdict lookup), mutation, readback: in that order.
       const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
       assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
         'GET /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/myself',
         'GET /rest/api/2/issue/KAN-1/comment',
         'PUT /rest/api/2/issue/KAN-1',
         'GET /rest/api/2/issue/KAN-1',
@@ -1204,9 +1206,581 @@ describe('claim.js CLI', () => {
     }
   });
 
-  // ------------------------------------------------------------------------
-  // Cleanup
-  // ------------------------------------------------------------------------
+  // ==========================================================================
+  // Verdict SHA acceptance criteria — 8 tests per the change contract
+  // ==========================================================================
+
+  // AC1: Вердикт верного формата с ACCEPT, автор — accountId гейта → готовность по вердикту
+  // подтверждена (проверяем readiness.verdictSha равен head PR).
+  test('AC1: valid ACCEPT verdict from gate account → verdictSha equals head PR', async () => {
+    const gh = mkTempDir('acv1');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [{ id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + headSha + ' dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: gateAccountId } }],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.reason, 'review_pending');
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.mode, 'review');
+      assert.strictEqual(out.readiness.verdictSha, headSha);
+      assert.strictEqual(out.readiness.headSha, headSha);
+      assert.strictEqual(out.readiness.ci, 'pending');
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC2: Тот же вердикт, но authorAccountId другого автора → verdictSha null, review_pending
+  test('AC2: ACCEPT verdict from non-gate account → verdictSha null, review_pending', async () => {
+    const gh = mkTempDir('acv2');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    const otherAccountId = 'other456';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [{ id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + headSha + ' dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: otherAccountId } }],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, null);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC3: Строка без dispatch=/task=/run= → verdictSha null, review_pending
+  test('AC3: verdict string missing identifiers → verdictSha null, review_pending', async () => {
+    const gh = mkTempDir('acv3');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [{ id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + headSha, author: { accountId: gateAccountId } }],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, null);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC4: Два комментария: сначала ACCEPT, затем CHANGES_REQUIRED по тому же SHA → review_pending
+  test('AC4: ACCEPT then CHANGES_REQUIRED on same SHA → review_pending', async () => {
+    const gh = mkTempDir('acv4');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [
+              { id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + headSha + ' dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: gateAccountId } },
+              { id: '2', body: 'AI-REVIEW-VERDICT: CHANGES_REQUIRED sha=' + headSha + ' dispatch=ctx_abc2 task=task_abc2 run=run_abc2', author: { accountId: gateAccountId } },
+            ],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, headSha);
+      assert.strictEqual(out.readiness.ci, null);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC5: Два комментария от учётной записи гейта: сначала CHANGES_REQUIRED, затем ACCEPT по тому же SHA → readiness.verdictSha равен head PR.
+  test('AC5: CHANGES_REQUIRED then ACCEPT on same SHA → verdictSha equals head PR', async () => {
+    const gh = mkTempDir('acv5');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [
+              { id: '1', body: 'AI-REVIEW-VERDICT: CHANGES_REQUIRED sha=' + headSha + ' dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: gateAccountId } },
+              { id: '2', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + headSha + ' dispatch=ctx_abc2 task=task_abc2 run=run_abc2', author: { accountId: gateAccountId } },
+            ],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, headSha);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC6: ACCEPT верного формата, но sha не совпадает с head PR → verdictSha null, код 0, state: review_pending
+  test('AC6: ACCEPT with mismatching sha → verdictSha null, review_pending', async () => {
+    const gh = mkTempDir('acv6');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    const verdictSha = '1234567890abcdef1234567890abcdef12345678';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ accountId: gateAccountId }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [
+              { id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + verdictSha + ' dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: gateAccountId } },
+            ],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, null);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // AC7: GET /myself вернул 500 → код 0, state: review_pending; падения нет
+  test('AC7: GET /myself returns 500 → code 0, review_pending, no crash', async () => {
+    const gh = mkTempDir('acv7');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gateAccountId = 'abc123';
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "' + headSha + '",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = false;
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal Server Error' }));
+          return;
+        }
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            comments: [],
+          }));
+          return;
+        }
+        if (!mutationCalled) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        }
+      } else if (req.method === 'PUT') {
+        await drainBody(req);
+        mutationCalled = true;
+        res.writeHead(204);
+        res.end();
+      } else {
+        await drainBody(req);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({}));
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
+        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+      ]) };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.readiness.verdictSha, null);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
   after(() => {
     // This after hook runs after all tests; no temp dirs to clean
     // because each test cleans up in its own finally block.
