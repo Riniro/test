@@ -12,6 +12,8 @@ import {
   setLabels,
   transition,
   addComment,
+  getComments,
+  getMyself,
   JiraError,
 } from '../tools/jira/client.js';
 
@@ -506,6 +508,126 @@ describe('addComment', () => {
 
     await assert.rejects(
       addComment({ creds, key: 'KAN-42', body: 'comment', fetchImpl }),
+      (err) => err.code === 'SOURCE_UNAVAILABLE'
+    );
+  });
+});
+
+// -- getComments -----------------------------------------------------
+
+describe('getComments', () => {
+  it('returns two comment objects in order with authorAccountId', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'first comment', author: { accountId: 'user1' } },
+        { id: '2', body: 'second comment', author: { accountId: 'user2' } },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 2);
+    assert.deepStrictEqual(result[0], { body: 'first comment', authorAccountId: 'user1' });
+    assert.deepStrictEqual(result[1], { body: 'second comment', authorAccountId: 'user2' });
+  });
+
+  it('returns authorAccountId null when no author', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'orphan comment' },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 1);
+    assert.deepStrictEqual(result[0], { body: 'orphan comment', authorAccountId: null });
+  });
+
+  it('drops comments where body is not a string', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'valid' },
+        { id: '2', body: 42 },
+        { id: '3', body: 'also valid' },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 2);
+    assert.strictEqual(result[0].body, 'valid');
+    assert.strictEqual(result[1].body, 'also valid');
+  });
+
+  it('throws AUTH_FAILED on 401', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+
+    await assert.rejects(
+      getComments({ creds, key: 'KAN-42', fetchImpl }),
+      (err) => err.code === 'AUTH_FAILED'
+    );
+  });
+
+  it('throws SOURCE_UNAVAILABLE on network error', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = makeFetchError;
+
+    await assert.rejects(
+      getComments({ creds, key: 'KAN-42', fetchImpl }),
+      (err) => err.code === 'SOURCE_UNAVAILABLE'
+    );
+  });
+});
+
+// -- getMyself -------------------------------------------------------
+
+describe('getMyself', () => {
+  it('returns accountId from response', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      accountId: 'abc123',
+      emailAddress: 'test@example.com',
+      displayName: 'Test User',
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getMyself({ creds, fetchImpl });
+    assert.deepStrictEqual(result, { accountId: 'abc123' });
+  });
+
+  it('returns accountId null when field is missing', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      emailAddress: 'test@example.com',
+      displayName: 'Test User',
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getMyself({ creds, fetchImpl });
+    assert.deepStrictEqual(result, { accountId: null });
+  });
+
+  it('throws AUTH_FAILED on 401', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+
+    await assert.rejects(
+      getMyself({ creds, fetchImpl }),
+      (err) => err.code === 'AUTH_FAILED'
+    );
+  });
+
+  it('throws SOURCE_UNAVAILABLE on network error', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = makeFetchError;
+
+    await assert.rejects(
+      getMyself({ creds, fetchImpl }),
       (err) => err.code === 'SOURCE_UNAVAILABLE'
     );
   });

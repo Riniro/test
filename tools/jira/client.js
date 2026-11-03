@@ -362,6 +362,30 @@ export async function addComment({ creds, key, body, fetchImpl }) {
 }
 
 /**
+ * Return the authenticated account.
+ *
+ * @param {object} opts
+ * @param {string} opts.creds.site
+ * @param {string} opts.creds.email
+ * @param {string} opts.creds.token
+ * @param {(url: string, init?: RequestInit) => Promise<Response>} [opts.fetchImpl]
+ * @returns {Promise<{ accountId: string | null }>}
+ */
+export async function getMyself({ creds, fetchImpl }) {
+  const fetcher = fetchImpl || fetch;
+  const data = /** @type {{ accountId?: string }} */ (
+    await _get({
+      site: creds.site,
+      email: creds.email,
+      token: creds.token,
+      path: '/myself',
+      fetchImpl: fetcher,
+    })
+  );
+  return { accountId: typeof data.accountId === 'string' ? data.accountId : null };
+}
+
+/**
  * Read comments from an issue.
  *
  * @param {object} opts
@@ -370,11 +394,11 @@ export async function addComment({ creds, key, body, fetchImpl }) {
  * @param {string} opts.creds.token
  * @param {string} opts.key
  * @param {(url: string, init?: RequestInit) => Promise<Response>} [opts.fetchImpl]
- * @returns {Promise<string[]>} — the `body` strings of all comments with a string body.
+ * @returns {Promise<Array<{ body: string, authorAccountId: string | null }>>} — comment objects with `body` and `authorAccountId`.
  */
 export async function getComments({ creds, key, fetchImpl }) {
   const fetcher = fetchImpl || fetch;
-  const data = /** @type {{ comments: Array<{ body?: unknown }> }} */ (
+  const data = /** @type {{ comments?: Array<{ body?: unknown, author?: { accountId?: string } }> }} */ (
     await _get({
       site: creds.site,
       email: creds.email,
@@ -384,13 +408,16 @@ export async function getComments({ creds, key, fetchImpl }) {
     })
   );
   const comments = data.comments || [];
-  const bodies = [];
+  const result = [];
   for (const c of comments) {
     if (typeof c.body === 'string') {
-      bodies.push(c.body);
+      result.push({
+        body: c.body,
+        authorAccountId: c.author && typeof c.author.accountId === 'string' ? c.author.accountId : null,
+      });
     }
   }
-  return bodies;
+  return result;
 }
 
 export { JiraError };

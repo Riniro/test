@@ -444,7 +444,7 @@ export async function main({ argv, env } = {}) {
   }
 
   if (comments.length > 0 && headRefOid) {
-    verdictSha = extractVerdictSha(comments);
+    verdictSha = extractVerdictSha(comments.map((c) => c.body));
     if (verdictSha) {
       ciStatus = await checkCiStatus(headRefOid, args.repo, e);
       if (verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === 'green') {
