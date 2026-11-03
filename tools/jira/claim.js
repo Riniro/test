@@ -6,7 +6,7 @@
 //   0 — claimed, readback confirmed
 //   2 — usage error or issue not found
 //   3 — ai-ready label absent (not ready to claim)
-//   4 — work already exists (PR found)
+//   4 — work already exists (PR found, awaiting merge or without --adopt-existing)
 //   5 — mutation succeeded but readback did not confirm
 //   6 — source unavailable or authentication failed
 
@@ -104,6 +104,88 @@ function keyInTitle(key, title) {
 }
 
 // ==========================================================================
+// ciCheck — verify CI status using pick up.js's parseCheckRuns
+// ==========================================================================
+
+const pickupModPath = path.join(__dirname, 'pickup.js');
+
+async function fetchCheckRunsForSha(mergeCommit, repo, env) {
+  const res = await ghSpawn(
+    ['api', 'repos/' + repo + '/commits/' + mergeCommit + '/check-runs'],
+    env
+  );
+  if (res.status !== 0 || !res.stdout) return [];
+  try {
+    const data = JSON.parse(res.stdout);
+    return Array.isArray(data) ? data : (data.check_runs || []);
+  } catch { return []; }
+}
+
+/**
+ * Determine CI status for a given commit SHA via `gh api check-runs`.
+ * Reuses parseCheckRuns from pickup.js.
+ *
+ * @param {string} headSha
+ * @param {string} repo
+ * @param {object} env
+ * @returns {Promise<'green'|'failed'|'pending'>}
+ */
+export async function checkCiStatus(headSha, repo, env) {
+  const pickupMod = await import(pathToFileURL(pickupModPath).href);
+  const runs = await fetchCheckRunsForSha(headSha, repo, env);
+  return pickupMod.parseCheckRuns(runs);
+}
+
+// ==========================================================================
+// Verdict SHA extraction from comments
+// ==========================================================================
+
+const VERDICT_RE = /^[ \t]*AI-REVIEW-VERDICT:[ \t]*ACCEPT[ \t]+sha=([0-9a-fA-F]{40})[ \t]*$/m;
+
+function extractVerdictSha(comments) {
+  for (const body of comments) {
+    const match = VERDICT_RE.exec(body);
+    if (match) {
+      return match[1]; // 40-char hex sha
+    }
+  }
+  return null;
+}
+
+// ==========================================================================
+// Label mutation helper
+// ==========================================================================
+
+async function mutateLabels({ creds, key, beforeLabels, remove, add }) {
+  const after = beforeLabels
+    .filter((l) => !remove.includes(l))
+    .concat(add);
+  const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+  await client.setLabels({ creds, key, labels: after });
+  return after;
+}
+
+// ==========================================================================
+// Readback helper
+// ==========================================================================
+
+async function readIssueBack({ creds, key }) {
+  const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+  return client.getIssue({ creds, key });
+}
+
+// Synchronous: the body does no I/O, and the call site uses the boolean directly.
+function verifyReadback(readbackLabels, beforeLabels, mustContain, mustNotContain) {
+  if (mustContain.some((l) => !readbackLabels.includes(l))) return false;
+  if (mustNotContain.some((l) => readbackLabels.includes(l))) return false;
+  for (const lb of beforeLabels) {
+    if (lb === 'ai-ready') continue;
+    if (!readbackLabels.includes(lb)) return false;
+  }
+  return true;
+}
+
+// ==========================================================================
 // Main logic
 // ==========================================================================
 
@@ -161,76 +243,252 @@ export async function main({ argv, env } = {}) {
   }
 
   // Look for OPEN or MERGED PR with matching issue key in title
+  let foundPr = null;
   for (const pr of prList) {
     if ((pr.state === 'OPEN' || pr.state === 'MERGED') && keyInTitle(args.issue, pr.title)) {
-      // Without --adopt-existing: return code 4, no mutations
-      if (!args.adoptExisting) {
-        exitJson(4, { success: false, reason: 'work_exists', pr: { number: pr.number, state: pr.state, url: pr.url } });
+      foundPr = pr;
+      break;
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // No PR found
+  // ----------------------------------------------------------------
+  if (!foundPr) {
+    const hasReady = labelsBefore.includes('ai-ready');
+    if (!hasReady) {
+      // No PR, no ai-ready → code 3
+      exitJson(3, { success: false, reason: 'not_ready' });
+    }
+
+    // No PR, has ai-ready → normal claim flow
+    const labelsAfter = labelsBefore.filter((l) => l !== 'ai-ready');
+
+    let setResult;
+    try {
+      const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+      await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
+      setResult = { ok: true };
+    } catch (err) {
+      if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
+        exitJson(6, { success: false, reason: 'source_unavailable' });
       }
+      exitJson(5, { success: false, reason: 'readback_failed' });
+    }
 
-      // With --adopt-existing: remove ai-ready, add ai-awaiting-merge, keep other labels
-      const labelsAfter = labelsBefore.map((l) => (l === 'ai-ready' ? 'ai-awaiting-merge' : l));
+    // Readback
+    let issueReadback;
+    try {
+      const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+      issueReadback = await client.getIssue({ creds, key: args.issue });
+    } catch {
+      exitJson(5, { success: false, reason: 'readback_failed' });
+    }
 
-      let setResult;
-      try {
-        const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-        await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
-        setResult = { ok: true };
-      } catch (err) {
-        if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
-          exitJson(6, { success: false, reason: 'source_unavailable' });
-        }
+    const readbackLabels = issueReadback.labels || [];
+    if (readbackLabels.includes('ai-ready')) {
+      exitJson(5, { success: false, reason: 'readback_failed' });
+    }
+    for (const lb of labelsBefore) {
+      if (lb === 'ai-ready') continue;
+      if (!readbackLabels.includes(lb)) {
         exitJson(5, { success: false, reason: 'readback_failed' });
       }
+    }
 
-      // Readback — verify labels
-      let issueReadback;
+    // Transition (optional)
+    const statusBefore = issue.status;
+    if (args.transitionId) {
+      try {
+        const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+        await client.transition({ creds, key: args.issue, transitionId: args.transitionId });
+      } catch {
+        exitJson(5, { success: false, reason: 'readback_failed' });
+      }
       try {
         const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
         issueReadback = await client.getIssue({ creds, key: args.issue });
       } catch {
         exitJson(5, { success: false, reason: 'readback_failed' });
       }
+    }
 
-      const readbackLabels = issueReadback.labels || [];
-      if (readbackLabels.includes('ai-ready')) {
-        exitJson(5, { success: false, reason: 'readback_failed' });
-      }
-      if (!readbackLabels.includes('ai-awaiting-merge')) {
-        exitJson(5, { success: false, reason: 'readback_failed' });
-      }
-      for (const lb of labelsBefore) {
-        if (lb === 'ai-ready') continue;
-        if (!readbackLabels.includes(lb)) {
-          exitJson(5, { success: false, reason: 'readback_failed' });
-        }
-      }
+    exitJson(0, {
+      success: true,
+      key: args.issue,
+      summary: issueReadback.summary || '',
+      labelsBefore: labelsBefore,
+      labelsAfter: readbackLabels,
+      statusBefore: statusBefore,
+      statusAfter: issueReadback.status || '',
+      claimedAt: new Date().toISOString(),
+      pr: null,
+      state: 'claimed',
+      mode: 'implement',
+    });
+  }
 
-      exitJson(4, {
-        success: false,
-        reason: 'work_exists',
-        adopted: true,
-        labelsBefore: labelsBefore,
-        labelsAfter: readbackLabels,
-        pr: { number: pr.number, state: pr.state, url: pr.url },
-      });
+  // ----------------------------------------------------------------
+  // PR found
+  // ----------------------------------------------------------------
+
+  // Without --adopt-existing: return code 4, no mutations
+  if (!args.adoptExisting) {
+    // Compute readiness even without adopting
+    let state = null;
+    let mode = null;
+    let readiness = null;
+
+    // We still need to check gh pr view for status — but per spec,
+    // without --adopt-existing we return code 4 with zero mutations.
+    // We can compute state/mode/readiness from the PR data alone.
+
+    // For OPEN PR: state=review_pending, mode=review (before we check readiness)
+    // For MERGED PR: state=merged, mode=close
+    if (foundPr.state === 'MERGED') {
+      state = 'merged';
+      mode = 'close';
+    } else {
+      state = 'review_pending';
+      mode = 'review';
+    }
+
+    exitJson(4, {
+      success: false,
+      reason: 'work_exists',
+      adopted: false,
+      state: state,
+      mode: mode,
+      labelsBefore: labelsBefore,
+      labelsAfter: labelsBefore,
+      pr: { number: foundPr.number, state: foundPr.state, url: foundPr.url, headSha: null },
+      readiness: null,
+    });
+  }
+
+  // With --adopt-existing: query gh pr view for status check
+  const prViewRes = await ghSpawn(
+    ['pr', 'view', String(foundPr.number), '--json', 'number,state,headRefOid,statusCheckRollup'],
+    e
+  );
+
+  if (prViewRes.status !== 0) {
+    // gh pr view failed → source_unavailable, zero mutations
+    exitJson(6, {
+      success: false,
+      reason: 'source_unavailable',
+      adopted: false,
+      labelsBefore: labelsBefore,
+      labelsAfter: labelsBefore,
+      pr: { number: foundPr.number, state: foundPr.state, url: foundPr.url, headSha: null },
+      readiness: null,
+    });
+  }
+
+  let prView;
+  try {
+    prView = JSON.parse(prViewRes.stdout);
+  } catch {
+    // JSON parse failed → source_unavailable, zero mutations
+    exitJson(6, {
+      success: false,
+      reason: 'source_unavailable',
+      adopted: false,
+      labelsBefore: labelsBefore,
+      labelsAfter: labelsBefore,
+      pr: { number: foundPr.number, state: foundPr.state, url: foundPr.url, headSha: null },
+      readiness: null,
+    });
+  }
+
+  const headRefOid = prView.headRefOid || null;
+  const statusCheckRollup = prView.statusCheckRollup || null;
+
+  // ----------------------------------------------------------------
+  // Determine readiness
+  // ----------------------------------------------------------------
+  let verdictSha = null;
+  let ciStatus = null;
+  let confirmed = false;
+
+  // Fetch comments to find verdict
+  let comments = [];
+  try {
+    const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+    comments = await client.getComments({ creds, key: args.issue });
+  } catch {
+    // Comments unavailable — cannot confirm readiness; falls through to review_pending
+  }
+
+  if (comments.length > 0 && headRefOid) {
+    verdictSha = extractVerdictSha(comments);
+    if (verdictSha) {
+      ciStatus = await checkCiStatus(headRefOid, args.repo, e);
+      if (verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === 'green') {
+        confirmed = true;
+      }
     }
   }
 
-  // --- Step 3: Check ai-ready label ---
-  const hasReady = labelsBefore.includes('ai-ready');
-  if (!hasReady) {
-    exitJson(3, { success: false, reason: 'not_ready' });
+  // ----------------------------------------------------------------
+  // Build state table
+  // ----------------------------------------------------------------
+  let state;
+  let mode;
+  let readiness;
+  let targetLabel;
+  let removeLabels;
+
+  if (foundPr.state === 'MERGED') {
+    state = 'merged';
+    mode = 'close';
+    targetLabel = 'ai-awaiting-merge';
+    removeLabels = ['ai-ready', 'ai-in-review'];
+  } else if (confirmed) {
+    state = 'awaiting_merge';
+    mode = null;
+    targetLabel = 'ai-awaiting-merge';
+    removeLabels = ['ai-ready', 'ai-in-review'];
+  } else {
+    // OPEN, not confirmed
+    state = 'review_pending';
+    mode = 'review';
+    targetLabel = 'ai-in-review';
+    removeLabels = ['ai-ready', 'ai-awaiting-merge'];
   }
 
-  // --- Step 4: Remove ai-ready, keeping other labels ---
-  const labelsAfter = labelsBefore.filter((l) => l !== 'ai-ready');
+  readiness = {
+    verdictSha: verdictSha,
+    headSha: headRefOid,
+    ci: ciStatus,
+  };
 
-  let setResult;
+  // ----------------------------------------------------------------
+  // If merged, exit code 0
+  // If awaiting_merge, exit code 4
+  // If review_pending, exit code 0 (continue processing)
+  // ----------------------------------------------------------------
+  let exitCode;
+  if (state === 'merged') {
+    exitCode = 0;
+  } else if (state === 'awaiting_merge') {
+    exitCode = 4;
+  } else {
+    exitCode = 0;
+  }
+
+  // ----------------------------------------------------------------
+  // Perform label mutation
+  // ----------------------------------------------------------------
+  let afterLabels;
   try {
-    const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-    await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
-    setResult = { ok: true };
+    afterLabels = await mutateLabels({
+      creds,
+      key: args.issue,
+      beforeLabels: labelsBefore,
+      remove: removeLabels,
+      add: [targetLabel],
+    });
   } catch (err) {
     if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
       exitJson(6, { success: false, reason: 'source_unavailable' });
@@ -238,66 +496,32 @@ export async function main({ argv, env } = {}) {
     exitJson(5, { success: false, reason: 'readback_failed' });
   }
 
-  // --- Step 4b: Readback — verify ai-ready is gone and other labels remain ---
+  // ----------------------------------------------------------------
+  // Readback verification
+  // ----------------------------------------------------------------
   let issueReadback;
   try {
-    const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-    issueReadback = await client.getIssue({ creds, key: args.issue });
-  } catch (err) {
+    issueReadback = await readIssueBack({ creds, key: args.issue });
+  } catch {
     exitJson(5, { success: false, reason: 'readback_failed' });
   }
 
   const readbackLabels = issueReadback.labels || [];
-  const readbackHasReady = readbackLabels.includes('ai-ready');
 
-  if (readbackHasReady) {
+  if (!verifyReadback(readbackLabels, labelsBefore, [targetLabel], removeLabels)) {
     exitJson(5, { success: false, reason: 'readback_failed' });
   }
 
-  // Check that all previous labels (except ai-ready) are still present
-  for (const lb of labelsBefore) {
-    if (lb === 'ai-ready') continue;
-    if (!readbackLabels.includes(lb)) {
-      exitJson(5, { success: false, reason: 'readback_failed' });
-    }
-  }
-
-  // --- Step 5: Transition (optional) ---
-  const statusBefore = issue.status;
-  if (args.transitionId) {
-    try {
-      const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-      await client.transition({ creds, key: args.issue, transitionId: args.transitionId });
-    } catch (err) {
-      exitJson(5, { success: false, reason: 'readback_failed' });
-    }
-
-    // Readback status
-    let issueStatusReadback;
-    try {
-      const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-      issueStatusReadback = await client.getIssue({ creds, key: args.issue });
-    } catch {
-      exitJson(5, { success: false, reason: 'readback_failed' });
-    }
-
-    if (issueStatusReadback.status !== issueReadback.status) {
-      // Update our local readback to the latest
-      issueReadback = issueStatusReadback;
-    }
-  }
-
-  // --- Step 6: Print claim summary (exit code 0) ---
-  exitJson(0, {
-    success: true,
-    key: args.issue,
-    summary: issueReadback.summary || '',
+  exitJson(exitCode, {
+    success: exitCode === 0,
+    reason: exitCode === 0 ? 'claimed' : 'work_exists',
+    adopted: true,
+    state: state,
+    mode: mode,
     labelsBefore: labelsBefore,
     labelsAfter: readbackLabels,
-    statusBefore: statusBefore,
-    statusAfter: issueReadback.status || '',
-    claimedAt: new Date().toISOString(),
-    pr: null,
+    pr: { number: foundPr.number, state: foundPr.state, url: foundPr.url, headSha: headRefOid },
+    readiness: readiness,
   });
 }
 

@@ -44,6 +44,16 @@ function startServer(handler) {
   });
 }
 
+// No fixture in this file models an ai-in-review issue, and a real Jira returns
+// none for a label nobody carries. Answer that query explicitly so the catch-all
+// branch of a stub cannot hand back the awaiting-merge issue instead.
+function noInReviewFixture(req, res) {
+  if (!(req.url || '').includes('ai-in-review')) return false;
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ issues: [] }));
+  return true;
+}
+
 function writeCredsFile(dir, site) {
   const p = path.join(dir, 'jira-creds.json');
   fs.writeFileSync(p, JSON.stringify({ site, email: 'test@example.com', token: 'tok-123' }), 'utf8');
@@ -260,6 +270,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         // No ready issues — only awaiting-merge
@@ -303,6 +314,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -349,6 +361,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
@@ -410,6 +423,7 @@ describe('CLI process tests', () => {
     const sd3 = mkTempDir('pick-s3');
 
     const { server: srv3, close: cs3 } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -460,6 +474,7 @@ describe('CLI process tests', () => {
     const jiraDir = mkTempDir('pick-j2a');
     const sd = mkTempDir('pick-s2a');
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -490,6 +505,7 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, 'process.exit(0);');
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -539,6 +555,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -596,6 +613,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
@@ -647,6 +665,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -704,6 +723,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -761,6 +781,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -841,6 +862,7 @@ describe('CLI process tests', () => {
     try {
       // Phase 2: run pickup with GH stub + Jira mock
       const { server: srv, close: cs } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -913,6 +935,7 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv1, close: cs1 } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -958,6 +981,7 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv2, close: cs2 } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1032,6 +1056,7 @@ describe('CLI process tests', () => {
 
       // Jira stub: ai-ready returns KAN-99, ai-awaiting-merge returns KAN-14
       const { server: srv, close: cs } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1096,6 +1121,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const srvObj = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [

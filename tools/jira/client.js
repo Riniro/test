@@ -361,4 +361,36 @@ export async function addComment({ creds, key, body, fetchImpl }) {
   });
 }
 
+/**
+ * Read comments from an issue.
+ *
+ * @param {object} opts
+ * @param {string} opts.creds.site
+ * @param {string} opts.creds.email
+ * @param {string} opts.creds.token
+ * @param {string} opts.key
+ * @param {(url: string, init?: RequestInit) => Promise<Response>} [opts.fetchImpl]
+ * @returns {Promise<string[]>} — the `body` strings of all comments with a string body.
+ */
+export async function getComments({ creds, key, fetchImpl }) {
+  const fetcher = fetchImpl || fetch;
+  const data = /** @type {{ comments: Array<{ body?: unknown }> }} */ (
+    await _get({
+      site: creds.site,
+      email: creds.email,
+      token: creds.token,
+      path: `/issue/${encodeURIComponent(key)}/comment`,
+      fetchImpl: fetcher,
+    })
+  );
+  const comments = data.comments || [];
+  const bodies = [];
+  for (const c of comments) {
+    if (typeof c.body === 'string') {
+      bodies.push(c.body);
+    }
+  }
+  return bodies;
+}
+
 export { JiraError };

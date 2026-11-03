@@ -83,13 +83,19 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('missing --project → code 2, usage', async () => {
     const gh = mkTempDir('claim-gh');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
     const jiraDir = mkTempDir('claim-j');
     const { server: srv, close: cs } = await startServer(() => {});
     const port = srv.address().port;
     const env = envForCli(jiraDir, port, path.join(gh, 'gh.js'));
     try {
-      const r = await runSpawn(CLI, ['--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 2);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -106,7 +112,13 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('issue not found → code 2, not_found', async () => {
     const gh = mkTempDir('claim-j2');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
     const { server: srv, close: cs } = await startServer((req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
@@ -114,7 +126,7 @@ describe('claim.js CLI', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 2);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -130,7 +142,13 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('missing ai-ready → code 3, not_ready', async () => {
     const gh = mkTempDir('claim-j3');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
     const { server: srv, close: cs } = await startServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -140,7 +158,7 @@ describe('claim.js CLI', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 3);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -156,7 +174,11 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('open PR → code 4, work_exists', async () => {
     const gh = mkTempDir('claim-j4');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
     fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
       'process.stdout.write(JSON.stringify(data) + "\\n");',
       'process.exit(0);',
@@ -174,7 +196,7 @@ describe('claim.js CLI', () => {
       const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ])};
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], envWithPr, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 4);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -193,10 +215,14 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('merged PR → code 4, work_exists', async () => {
     const gh = mkTempDir('claim-j4b');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
     const prList = JSON.stringify([
       { number: 42, state: 'MERGED', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
     ]);
     fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
       'process.exit(0);',
     ].join(''));
@@ -223,7 +249,7 @@ describe('claim.js CLI', () => {
       { number: 42, state: 'MERGED', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
     ])};
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], envWithPr, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 4);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -238,35 +264,63 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   // Exit code 5 — readback_failed (readback returns old labels)
   // ------------------------------------------------------------------------
-  test('readback returns old labels → code 5, readback_failed', async () => {
+  test('readback_failed: GET, PUT, GET → code 5, readback_failed', async () => {
     const gh = mkTempDir('claim-j5');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write("[]" + "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
     const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
       if (req.method === 'GET') {
-        // Always return ai-ready present — readback will fail
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        // The mutation never sticks: ai-ready is still there on readback.
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'ai-ready', 'review'] },
         }));
+        return;
+      }
+      await drainBody(req);
+      if (req.method === 'PUT') {
+        res.writeHead(204);
+        res.end();
       } else {
-        await drainBody(req);
-        if (req.method === 'PUT' || req.method === 'POST') {
-          res.writeHead(204);
-          res.end();
-        } else {
-          res.writeHead(405, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'method not allowed' }));
-        }
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'method not allowed' }));
       }
     });
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 5);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.reason, 'readback_failed');
+
+      // Read, mutate, read back: the failure is reached only after the mutation.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
+        'GET /rest/api/2/issue/KAN-1',
+        'PUT /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1',
+      ]);
+
+      // Without --adopt-existing claim.js lists PRs and never views one.
+      const argvs = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(argvs.map((a) => a.slice(0, 2)), [['pr', 'list']]);
     } finally {
       await cs();
       cleanup(gh);
@@ -278,7 +332,13 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('source unavailable → code 6, source_unavailable', async () => {
     const gh = mkTempDir('claim-j6');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
     const credPath = writeCredsFile(gh, 'http://127.0.0.1:1');
     const env = {
       ...process.env,
@@ -288,7 +348,7 @@ describe('claim.js CLI', () => {
       PICKUP_GH_PREFIX_ARGS_JSON: '[]',
     };
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 6);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
@@ -303,7 +363,13 @@ describe('claim.js CLI', () => {
   // ------------------------------------------------------------------------
   test('successful claim → code 0, labels preserved', async () => {
     const gh = mkTempDir('claim-j0');
-    fs.writeFileSync(path.join(gh, 'gh.js'), 'process.exit(0);');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.exit(0);',
+    ].join(''));
     const { server: srv, close: cs } = await startServer(async (req, res) => {
       if (req.method === 'GET') {
         // First call (read before mutation): ai-ready present
@@ -329,7 +395,7 @@ describe('claim.js CLI', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], env, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 0);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, true);
@@ -349,7 +415,11 @@ describe('claim.js CLI', () => {
   test('work_exists without --adopt-existing → no Jira mutations', async () => {
     let mutationCount = 0;
     const gh = mkTempDir('claim-j4m');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
     fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
       'process.stdout.write(JSON.stringify(data) + "\\n");',
       'process.exit(0);',
@@ -373,7 +443,7 @@ describe('claim.js CLI', () => {
       const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ])};
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], envWithPr, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 4);
       assert.strictEqual(mutationCount, 0, 'Jira should not receive any mutation requests for work_exists without --adopt-existing');
     } finally {
@@ -383,18 +453,38 @@ describe('claim.js CLI', () => {
   });
 
   // ------------------------------------------------------------------------
-  // Exit code 4 — adopt-existing: open PR → code 4 with adopted: true
+  // adopt-existing open PR: claim.js builds state=review_pending, mode=review, exitCode=0
   // ------------------------------------------------------------------------
-  test('adopt-existing open PR → code 4, adopted: true', async () => {
+  test('adopt-existing open PR → code 0, state: review_pending, mode: review', async () => {
     const gh = mkTempDir('claim-ja');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
     fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
-      'process.stdout.write(JSON.stringify(data) + "\\n");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "abc123def456",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
       'process.exit(0);',
     ].join(''));
     let mutationCalled = false;
     const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
       if (req.method === 'GET') {
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
         if (!mutationCalled) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
@@ -403,7 +493,7 @@ describe('claim.js CLI', () => {
         } else {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-awaiting-merge'] },
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
           }));
         }
       } else {
@@ -419,16 +509,34 @@ describe('claim.js CLI', () => {
       const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ])};
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], envWithPr, 10000);
-      assert.strictEqual(r.status, 4);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      assert.strictEqual(r.status, 0);
       const out = JSON.parse(r.stdout);
-      assert.strictEqual(out.success, false);
-      assert.strictEqual(out.reason, 'work_exists');
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.reason, 'claimed');
       assert.strictEqual(out.adopted, true);
+      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.mode, 'review');
       assert.deepStrictEqual(out.labelsBefore, ['project-test', 'review', 'ai-ready']);
-      assert.deepStrictEqual(out.labelsAfter, ['project-test', 'review', 'ai-awaiting-merge']);
+      assert.deepStrictEqual(out.labelsAfter, ['project-test', 'review', 'ai-in-review']);
       assert.ok(out.pr);
       assert.strictEqual(out.pr.number, 42);
+
+      // Issue, comments (verdict lookup), mutation, readback: in that order.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
+        'GET /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1/comment',
+        'PUT /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1',
+      ]);
+
+      // Verify gh stub received both pr list and pr view calls with separate argv
+      const argvs = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+      const prListCall = argvs.find((a) => Array.isArray(a) && a[0] === 'pr' && a[1] === 'list');
+      const prViewCall = argvs.find((a) => Array.isArray(a) && a[0] === 'pr' && a[1] === 'view');
+      assert.ok(prListCall, 'gh stub should have been called with pr list');
+      assert.ok(prViewCall, 'gh stub should have been called with pr view');
     } finally {
       await cs();
       cleanup(gh);
@@ -436,18 +544,38 @@ describe('claim.js CLI', () => {
   });
 
   // ------------------------------------------------------------------------
-  // Exit code 5 — adopt-existing: readback_failed (ai-ready still present after mutation)
+  // Exit code 5 — adopt-existing: readback_failed (ai-in-review still absent after mutation)
   // ------------------------------------------------------------------------
   test('adopt-existing readback_failed → code 5', async () => {
     const gh = mkTempDir('claim-jr');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    const jiraLog = path.join(gh, 'jira-calls.jsonl');
     fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'var data = JSON.parse(process.env.CLAIM_PR_LIST || "[]");',
-      'process.stdout.write(JSON.stringify(data) + "\\n");',
+      'if (process.argv[2] === "pr" && process.argv[3] === "list") {',
+      '  process.stdout.write(JSON.stringify(data) + "\\n");',
+      '} else if (process.argv[2] === "pr" && process.argv[3] === "view") {',
+      '  process.stdout.write(JSON.stringify({',
+      '    number: data[0].number,',
+      '    state: data[0].state,',
+      '    headRefOid: "abc123def456",',
+      '    statusCheckRollup: null',
+      '  }) + "\\n");',
+      '}',
       'process.exit(0);',
     ].join(''));
     const { server: srv, close: cs } = await startServer(async (req, res) => {
+      fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
       if (req.method === 'GET') {
-        // Always return ai-ready still present
+        if (req.url.endsWith('/comment')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ comments: [] }));
+          return;
+        }
+        // Always return ai-ready still present (mutation didn't stick)
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
@@ -464,11 +592,20 @@ describe('claim.js CLI', () => {
       const envWithPr = { ...env, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'MERGED', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ])};
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], envWithPr, 10000);
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 5);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.reason, 'readback_failed');
+
+      // Issue, comments (verdict lookup), mutation, readback: in that order.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
+        'GET /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1/comment',
+        'PUT /rest/api/2/issue/KAN-1',
+        'GET /rest/api/2/issue/KAN-1',
+      ]);
     } finally {
       await cs();
       cleanup(gh);
