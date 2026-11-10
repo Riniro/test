@@ -9,6 +9,7 @@
 //   4 — work already exists (PR found, awaiting merge or without --adopt-existing)
 //   5 — mutation succeeded but readback did not confirm
 //   6 — source unavailable or authentication failed
+//   7 — the mutation request itself failed (no readback was performed)
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -78,7 +79,10 @@ function ghSpawn(argv, env) {
 // ==========================================================================
 
 function exitJson(statusCode, body) {
-  process.stdout.write(JSON.stringify(body) + '\n');
+  // `state` is mandatory in every output and equals `reason`.
+  const out = { ...body };
+  if (out.reason !== undefined) out.state = out.reason;
+  process.stdout.write(JSON.stringify(out) + '\n');
   process.exit(statusCode);
 }
 
@@ -106,10 +110,8 @@ function keyInTitle(key, title) {
 }
 
 // ==========================================================================
-// ciCheck — verify CI status using pick up.js's parseCheckRuns
+// ciCheck — mandatory check-runs gate
 // ==========================================================================
-
-const pickupModPath = path.join(__dirname, 'pickup.js');
 
 async function fetchCheckRunsForSha(mergeCommit, repo, env) {
   const res = await ghSpawn(
@@ -123,19 +125,33 @@ async function fetchCheckRunsForSha(mergeCommit, repo, env) {
   } catch { return []; }
 }
 
+const DEFAULT_REQUIRED_CHECKS = ['Tests (ubuntu-latest)', 'Tests (windows-latest)'];
+
+function requiredChecks(env) {
+  const raw = env && env.CLAIM_REQUIRED_CHECKS;
+  if (typeof raw !== 'string') return DEFAULT_REQUIRED_CHECKS;
+  return raw.split(',').map((s) => s.trim()).filter((s) => s !== '');
+}
+
 /**
- * Determine CI status for a given commit SHA via `gh api check-runs`.
- * Reuses parseCheckRuns from pickup.js.
+ * True only when EVERY required check is present, completed and successful.
+ * Missing, queued, in_progress and any non-success conclusion are not green.
+ */
+export function allRequiredChecksGreen(runs, required) {
+  if (!Array.isArray(runs) || required.length === 0) return false;
+  return required.every((name) => runs.some(
+    (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
+  ));
+}
+
+/**
+ * Mandatory CI gate for a commit SHA via `gh api check-runs`.
  *
- * @param {string} headSha
- * @param {string} repo
- * @param {object} env
- * @returns {Promise<'green'|'failed'|'pending'>}
+ * @returns {Promise<boolean>}
  */
 export async function checkCiStatus(headSha, repo, env) {
-  const pickupMod = await import(pathToFileURL(pickupModPath).href);
   const runs = await fetchCheckRunsForSha(headSha, repo, env);
-  return pickupMod.parseCheckRuns(runs);
+  return allRequiredChecksGreen(runs, requiredChecks(env));
 }
 
 // ==========================================================================
@@ -216,8 +232,9 @@ async function readIssueBack({ creds, key }) {
 function verifyReadback(readbackLabels, beforeLabels, mustContain, mustNotContain) {
   if (mustContain.some((l) => !readbackLabels.includes(l))) return false;
   if (mustNotContain.some((l) => readbackLabels.includes(l))) return false;
+  // Every foreign label survives; labels the gate removed on purpose are not "foreign".
   for (const lb of beforeLabels) {
-    if (lb === 'ai-ready') continue;
+    if (lb === 'ai-ready' || mustNotContain.includes(lb)) continue;
     if (!readbackLabels.includes(lb)) return false;
   }
   return true;
@@ -350,8 +367,11 @@ export async function main({ argv, env } = {}) {
       try {
         const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
         await client.transition({ creds, key: args.issue, transitionId: args.transitionId });
-      } catch {
-        exitJson(5, { success: false, reason: 'readback_failed' });
+      } catch (err) {
+        if (err.code === 'AUTH_FAILED') {
+          exitJson(6, { success: false, reason: 'source_unavailable' });
+        }
+        exitJson(7, { success: false, reason: 'mutation_failed' });
       }
       try {
         const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
@@ -467,7 +487,7 @@ export async function main({ argv, env } = {}) {
   // Determine readiness
   // ----------------------------------------------------------------
   let verdictSha = null;
-  let ciStatus = null;
+  let ciStatus = null; // null until a positive verdict triggers the CI request
   let confirmed = false;
 
   // Fetch gate's own account and comments to find verdict
@@ -487,7 +507,7 @@ export async function main({ argv, env } = {}) {
     verdictSha = result.sha;
     if (result.verdict === 'ACCEPT') {
       ciStatus = await checkCiStatus(headRefOid, args.repo, e);
-      if (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === 'green') {
+      if (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === true) {
         confirmed = true;
       }
     }
@@ -521,10 +541,7 @@ export async function main({ argv, env } = {}) {
 
   // readiness.ci: null — CI не запрашивался (нет ACCEPT для этого SHA);
   // false — запрашивался, не все прошли; true — все прошли.
-  const acceptedForSha = (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase());
-  const readinessCi = acceptedForSha
-    ? (confirmed ? true : false)
-    : null;
+  const readinessCi = ciStatus;
 
   const readiness = {
     verdictSha: verdictSha,

@@ -730,7 +730,7 @@ describe('claim.js CLI', () => {
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.reason, 'work_exists');
-      assert.strictEqual(out.state, 'review_pending');
+      assert.strictEqual(out.state, 'work_exists'); // contract: state equals reason (was review_pending)
       assert.strictEqual(mutationCount, 0, 'work_exists without --adopt-existing must not mutate Jira');
     } finally {
       await cs();
@@ -1801,7 +1801,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'if (process.argv.indexOf("check-runs") !== -1) {',
+      'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
       '  process.stdout.write(process.env.CHECK_RUNS || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
@@ -1826,7 +1826,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'if (process.argv.indexOf("check-runs") !== -1) {',
+      'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
       '  process.stdout.write(process.env.' + envVarName + ' || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
@@ -2071,7 +2071,7 @@ describe('claim.js — mandatory check-runs gate', () => {
         // After mutation
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-awaiting-merge'] },
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review'] },
         }));
       } else if (req.method === 'PUT') {
         await drainBody(req);
@@ -2091,18 +2091,17 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const envWithPr = { ...env, CHECK_RUNS: BOTH_PASSING, CLAIM_PR_LIST: JSON.stringify([
-        { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
-      ]) };
-      // Use --transition-id to trigger the transition code path
-      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing', '--transition-id', '5', '--expect-status', 'In Review'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+      // The transition request exists only in the claim flow (no PR, ai-ready present):
+      // the adopt-existing path never issues one.
+      const envWithPr = { ...env, CHECK_RUNS: BOTH_PASSING, CLAIM_PR_LIST: '[]' };
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--transition-id', '5', '--expect-status', 'In Review'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
       assert.strictEqual(r.status, 7);
       const out = JSON.parse(r.stdout);
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.state, 'mutation_failed');
       assert.strictEqual(out.reason, 'mutation_failed');
 
-      // Call sequence: GET issue, GET myself, GET comments, PUT labels, GET readback, POST transition(500) — no readback after transition.
+      // Call sequence: GET issue, PUT labels, GET readback, POST transition(500) — no readback after transition.
       const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
       const lastCall = calls[calls.length - 1];
       assert.strictEqual(lastCall.method, 'POST', 'last call should be transition');
@@ -2141,6 +2140,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       ]), expectedCode: 0, expectedState: 'review_pending' },
     ];
 
+    try {
     for (const sc of scenarios) {
       const envWithPr = { ...env, CHECK_RUNS: sc.checkRuns, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
@@ -2152,8 +2152,11 @@ describe('claim.js — mandatory check-runs gate', () => {
       assert.strictEqual(out.state, out.reason, 'state equals reason for ' + sc.desc);
       assert.strictEqual(out.state, sc.expectedState, 'expected state for ' + sc.desc);
     }
-    await cs();
-    cleanup(gh);
+    } finally {
+      // Always close the server: an open handle keeps the whole test file from exiting.
+      await cs();
+      cleanup(gh);
+    }
   });
 
   // AC8: state присутствует в выводе отказа без обращения к сети (код 2, usage)
@@ -2185,26 +2188,7 @@ describe('claim.js — mandatory check-runs gate', () => {
   test('AC9: CLAIM_REQUIRED_CHECKS overrides defaults', async () => {
     const gh = mkTempDir('ac-ci9');
     const logPath = path.join(gh, 'gh-argv.jsonl');
-    fs.writeFileSync(path.join(gh, 'gh.js'), [
-      'var fs = require("fs");',
-      'var p = process.env.GH_ARGV_LOG;',
-      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'if (process.argv[1] === "pr" && process.argv[2] === "list") {',
-      '  process.stdout.write(JSON.parse(process.env.CLAIM_PR_LIST || "[]") + "\\n");',
-      '} else if (process.argv[1] === "pr" && process.argv[2] === "view") {',
-      '  process.stdout.write(JSON.stringify({',
-      '    number: JSON.parse(process.env.CLAIM_PR_LIST || "[]")[0].number,',
-      '    state: JSON.parse(process.env.CLAIM_PR_LIST || "[]")[0].state,',
-      '    headRefOid: "abcdef0123456789abcdef0123456789abcdef01",',
-      '    statusCheckRollup: null',
-      '  }) + "\\n");',
-      '} else if (process.argv[1] === "api" && process.argv.join(" ").includes("check-runs")) {',
-      '  process.stdout.write(process.env.CHECK_RUNS || "[]" + "\\n");',
-      '} else {',
-      '  process.stdout.write("[]" + "\\n");',
-      '}',
-      'process.exit(0);',
-    ].join(''));
+    fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
     let mutationCalled = { value: false };
     const { server: srv, close: cs } = await startServer(async (req, res) => {
       if (req.method === 'GET') {
@@ -2294,6 +2278,94 @@ describe('claim.js — mandatory check-runs gate', () => {
       assert.strictEqual(out.state, 'review_pending');
       assert.ok(out.state, 'state field present');
       assert.strictEqual(out.state, out.reason);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+
+  // Chain: review_pending → awaiting_merge → closing on ONE task.
+  // An existing PR must never lead to a re-implementation: no step reports mode "implement".
+  test('chain review_pending → awaiting_merge → closing never yields mode implement', async () => {
+    const gh = mkTempDir('ac-chain');
+    const stateFile = path.join(gh, 'gh-state.json');
+    const writeGh = (prState, checkRuns) => fs.writeFileSync(stateFile, JSON.stringify({ prState, checkRuns }));
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var st = JSON.parse(fs.readFileSync(process.env.GH_STATE_FILE, "utf8"));',
+      'var a = process.argv.slice(2);',
+      'if (a[0] === "pr" && a[1] === "list") {',
+      '  process.stdout.write(JSON.stringify([{ number: 42, state: st.prState, title: "[KAN-1] Fix bug", url: "https://gh.test/Riniro/test/pull/42" }]));',
+      '} else if (a[0] === "pr" && a[1] === "view") {',
+      '  process.stdout.write(JSON.stringify({ number: 42, state: st.prState, headRefOid: "' + HEAD_SHA + '", statusCheckRollup: null }));',
+      '} else if (a[0] === "api" && a[1].slice(-11) === "/check-runs") {',
+      '  process.stdout.write(JSON.stringify({ check_runs: st.checkRuns }));',
+      '} else {',
+      '  process.stdout.write("[]");',
+      '}',
+      'process.exit(0);',
+    ].join(''));
+
+    const jira = { labels: ['project-test', 'review', 'ai-ready'], comments: [] };
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (req.url.endsWith('/myself')) { res.end(JSON.stringify({ accountId: GATE_ACCOUNT })); return; }
+        if (req.url.endsWith('/comment')) { res.end(JSON.stringify({ comments: jira.comments })); return; }
+        res.end(JSON.stringify({ fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: jira.labels } }));
+        return;
+      }
+      const body = await drainBody(req);
+      if (req.method === 'PUT') {
+        try { jira.labels = JSON.parse(body).fields.labels; } catch { /* keep */ }
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200);
+      res.end();
+    });
+    const port = srv.address().port;
+    const env = { ...envForCli(gh, port, path.join(gh, 'gh.js')), GH_STATE_FILE: stateFile };
+    const run = async () => {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], env, 10000);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    try {
+      // Step 1: open PR, no verdict yet → review_pending
+      writeGh('OPEN', JSON.parse(BOTH_PASSING));
+      const s1 = await run();
+      assert.strictEqual(s1.status, 0);
+      assert.strictEqual(s1.out.state, 'review_pending');
+      assert.strictEqual(s1.out.mode, 'review');
+      assert.ok(s1.out.labelsAfter.includes('ai-in-review'));
+      assert.ok(!s1.out.labelsAfter.includes('ai-ready'));
+
+      // Step 2: verdict by the gate's account for the head SHA + both checks green → awaiting_merge
+      jira.comments.push({
+        id: '1',
+        body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+        author: { accountId: GATE_ACCOUNT },
+      });
+      const s2 = await run();
+      assert.strictEqual(s2.status, 4);
+      assert.strictEqual(s2.out.state, 'awaiting_merge');
+      assert.strictEqual(s2.out.readiness.ci, true);
+      assert.ok(s2.out.labelsAfter.includes('ai-awaiting-merge'));
+      assert.ok(!s2.out.labelsAfter.includes('ai-in-review'));
+
+      // Step 3: human merged the PR → closing, label kept
+      writeGh('MERGED', JSON.parse(BOTH_PASSING));
+      const s3 = await run();
+      assert.strictEqual(s3.status, 0);
+      assert.strictEqual(s3.out.state, 'closing');
+      assert.strictEqual(s3.out.mode, 'close');
+      assert.ok(s3.out.labelsAfter.includes('ai-awaiting-merge'));
+
+      for (const [i, s] of [s1, s2, s3].entries()) {
+        assert.notStrictEqual(s.out.mode, 'implement', 'step ' + (i + 1) + ' must not re-implement');
+        assert.ok(!s.out.labelsAfter.includes('ai-ready'), 'step ' + (i + 1) + ' must not leave ai-ready');
+      }
     } finally {
       await cs();
       cleanup(gh);

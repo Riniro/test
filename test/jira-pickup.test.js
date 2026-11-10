@@ -1155,4 +1155,87 @@ describe('CLI process tests', () => {
       cleanup(ghStubDir);
     }
   });
+  // ------------------------------------------------------------------------
+  // ai-in-review branch (reason: 'review') — contract: continuing started work
+  // takes priority over picking up new work. gh is never needed on this branch.
+  // ------------------------------------------------------------------------
+  function noGhStub() {
+    const d = mkTempDir('pick-gh-none');
+    const stubPath = path.join(d, 'gh.js');
+    fs.writeFileSync(stubPath, 'process.stdout.write("[]\n");process.exit(0);');
+    return { dir: d, stubPath };
+  }
+
+  test('ai-in-review issue → code 0, reason review, issue returned', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (url.includes('ai-in-review')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-in-review'] } }] }));
+        } else {
+          res.end(JSON.stringify({ issues: [] }));
+        }
+      });
+      assert.strictEqual(result.status, 0);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.work, true);
+      assert.strictEqual(out.reason, 'review');
+      assert.strictEqual(out.issue.key, 'KAN-14');
+      assert.ok(out.issue.labels.includes('ai-in-review'));
+      assert.strictEqual(out.pr, null);
+      assert.strictEqual(out.counts.inReview, 1);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
+
+  test('ai-in-review wins over ai-ready and ai-awaiting-merge', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (url.includes('ai-in-review')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-14', fields: { summary: 'In review', labels: ['project-test', 'ai-in-review'] } }] }));
+        } else if (url.includes('ai-ready')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-20', fields: { summary: 'New', labels: ['project-test', 'ai-ready'] } }] }));
+        } else {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-9', fields: { summary: 'Waiting', labels: ['project-test', 'ai-awaiting-merge'] } }] }));
+        }
+      });
+      assert.strictEqual(result.status, 0);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.reason, 'review');
+      assert.strictEqual(out.issue.key, 'KAN-14', 'started work is continued, new work is not picked up');
+      assert.strictEqual(out.counts.ready, 1);
+      assert.strictEqual(out.counts.awaitingMerge, 1);
+      assert.strictEqual(out.counts.inReview, 1);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
+
+  test('ai-in-review query unauthorized → code 4, unavailable (not an empty queue)', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        if (url.includes('ai-in-review')) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ issues: [] }));
+      });
+      assert.strictEqual(result.status, 4);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.reason, 'unavailable');
+      assert.strictEqual(out.counts.inReview, null);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
 });
