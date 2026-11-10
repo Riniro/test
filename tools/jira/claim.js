@@ -498,7 +498,6 @@ export async function main({ argv, env } = {}) {
   // ----------------------------------------------------------------
   let state;
   let mode;
-  let readiness;
   let targetLabel;
   let removeLabels;
 
@@ -520,10 +519,17 @@ export async function main({ argv, env } = {}) {
     removeLabels = ['ai-ready', 'ai-awaiting-merge'];
   }
 
-  readiness = {
+  // readiness.ci: null — CI не запрашивался (нет ACCEPT для этого SHA);
+  // false — запрашивался, не все прошли; true — все прошли.
+  const acceptedForSha = (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase());
+  const readinessCi = acceptedForSha
+    ? (confirmed ? true : false)
+    : null;
+
+  const readiness = {
     verdictSha: verdictSha,
     headSha: headRefOid,
-    ci: ciStatus,
+    ci: readinessCi,
   };
 
   // ----------------------------------------------------------------
