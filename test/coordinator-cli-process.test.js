@@ -798,7 +798,8 @@ test('R5.9: the accepted result cannot be saved (journal is unwritable under the
 test('R2: success — accepted result saved BEFORE the executor, executor gets the task in the environment, argv untouched, lock released', (t) => {
   const c = newCase();
   t.after(c.cleanup);
-  const env = prepareRoute(c.scratch, c.stateDir);
+  const candidateCreatedAt = agoIso(2000);
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: freshCandidate({ createdAt: candidateCreatedAt }) });
   const journalFile = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
   const probe = writeProbeChild(c.scratch, c.marker, journalFile);
   const r = runStart(c, env, { tail: [process.execPath, probe, 'A', '--issue', 'OTHER-1', '--mode', 'review'] });
@@ -811,6 +812,7 @@ test('R2: success — accepted result saved BEFORE the executor, executor gets t
   assert.equal(seen.mode, 'implement');
   assert.ok(seen.journalClaim, 'the executor must find the accepted result already in the journal');
   assert.equal(seen.createdAt, seen.journalClaim.createdAt);
+  assert.notEqual(seen.createdAt, candidateCreatedAt, 'the accepted result has its own creation time, not the candidate\'s');
   assert.deepStrictEqual(
     { issueKey: seen.journalClaim.issueKey, state: seen.journalClaim.state, mode: seen.journalClaim.mode, pr: seen.journalClaim.pr },
     { issueKey: 'KAN-14', state: 'claimed', mode: 'implement', pr: null },
