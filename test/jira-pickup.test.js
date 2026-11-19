@@ -1703,3 +1703,79 @@ describe('pickup round 3', () => {
     assert.deepStrictEqual(r.jiraCalls.filter((c) => !c.startsWith('GET ')), [], 'no Jira writes');
   });
 });
+
+// ==========================================================================
+// R1 — a failed search with ANY code stops the queue (not a code whitelist)
+// ==========================================================================
+
+describe('search failure of any code is unavailable (R1)', () => {
+  // Stub Jira: `failLabel` gets `failStatus`; others get `okIssues[label]` (or an empty list).
+  // gh is a stub that records every call so "zero GitHub calls" is provable.
+  async function runCase({ failLabel, failStatus, okIssues = {} }) {
+    const dir = mkTempDir('pick-r1');
+    const ghLog = path.join(dir, 'gh-calls.log');
+    const stub = path.join(dir, 'gh.js');
+    fs.writeFileSync(stub, `require('fs').appendFileSync(${JSON.stringify(ghLog)}, 'call\n'); process.stdout.write('[]');`);
+    const jiraDir = mkTempDir('pick-r1j');
+    const sd = mkTempDir('pick-r1s');
+    const labels = ['ai-awaiting-merge', 'ai-ready', 'ai-in-review'];
+    const { server: srv, close } = await startServer((req, res) => {
+      const url = decodeURIComponent(req.url || '');
+      const label = labels.find((l) => url.includes(l));
+      if (label && label === failLabel) {
+        res.writeHead(failStatus, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ errorMessages: ['x'] }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const issues = (okIssues[label] || []).map((k) => ({ key: k, fields: { summary: k, labels: ['project-test', label] } }));
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      const ghCalls = fs.existsSync(ghLog) ? fs.readFileSync(ghLog, 'utf8').split('\n').filter(Boolean).length : 0;
+      return { r, ghCalls };
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  }
+
+  for (const [n, label] of [[1, 'ai-awaiting-merge'], [2, 'ai-ready'], [3, 'ai-in-review']]) {
+    test(`R1.${n}: 404 on the ${label} search → exit 4 unavailable, zero GitHub calls`, async () => {
+      const { r, ghCalls } = await runCase({ failLabel: label, failStatus: 404 });
+      assert.strictEqual(r.status, 4, r.stdout + r.stderr);
+      assert.strictEqual(JSON.parse(r.stdout).reason, 'unavailable');
+      assert.strictEqual(ghCalls, 0);
+    });
+  }
+
+  for (const label of ['ai-awaiting-merge', 'ai-ready', 'ai-in-review']) {
+    test(`R1.4: 500 on the ${label} search → exit 4 unavailable`, async () => {
+      const { r } = await runCase({ failLabel: label, failStatus: 500 });
+      assert.strictEqual(r.status, 4, r.stdout + r.stderr);
+      assert.strictEqual(JSON.parse(r.stdout).reason, 'unavailable');
+    });
+  }
+
+  test('R1.5: successful empty lists on all three searches → exit 3 none', async () => {
+    const { r } = await runCase({ failLabel: null });
+    assert.strictEqual(r.status, 3, r.stdout + r.stderr);
+    assert.strictEqual(JSON.parse(r.stdout).reason, 'none');
+  });
+
+  test('R1.6: successful search with a ready issue → previous path (exit 0, the issue is picked)', async () => {
+    const { r } = await runCase({ failLabel: null, okIssues: { 'ai-ready': ['KAN-7'] } });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.work, true);
+    assert.strictEqual(out.issue.key, 'KAN-7');
+  });
+});

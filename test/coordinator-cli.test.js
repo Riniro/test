@@ -655,3 +655,74 @@ test('status with valid journal shows stage and updatedAt', async (t) => {
   assert.ok(result.stdout?.includes('stage: execution'));
   assert.ok(result.stdout?.includes('updatedAt:'));
 });
+
+// ------------------------------------------------------------------
+// R3.2 — precheck through main(), pickup/claim are stub processes
+// ------------------------------------------------------------------
+function writePrecheckStubs(dir, { pkCode, pkOut, clCode, clOut }) {
+  const pk = path.join(dir, 'pk-stub.mjs');
+  const cl = path.join(dir, 'cl-stub.mjs');
+  const clLog = path.join(dir, 'claim-called');
+  fs.writeFileSync(pk, `process.stdout.write(${JSON.stringify(pkOut)} + '\\n'); process.exit(${pkCode});`);
+  fs.writeFileSync(cl, [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(clLog)}, 'called');`,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(clOut))} + '\\n'); process.exit(${clCode});`,
+  ].join('\n'));
+  return { env: { PRECHECK_PICKUP_SCRIPT: pk, PRECHECK_CLAIM_SCRIPT: cl }, clLog };
+}
+
+test('precheck: claim 0 review_pending/review → exit 0 and the journal carries the claim', async (t) => {
+  const stateDir = tmpDir();
+  t.after(() => cleanup(stateDir));
+  const { env } = writePrecheckStubs(stateDir, {
+    pkCode: 0, pkOut: JSON.stringify({ work: true, issue: { key: 'KAN-14' } }),
+    clCode: 0, clOut: { success: true, state: 'review_pending', mode: 'review', pr: { number: 7, url: 'u', headSha: 'sha1' } },
+  });
+  const rc = await main({
+    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
+    cwd: process.cwd(),
+    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
+  });
+  assert.equal(rc, 0);
+  const jr = readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) });
+  assert.equal(jr.ok, true);
+  assert.deepStrictEqual(jr.record.claim, {
+    issueKey: 'KAN-14', state: 'review_pending', mode: 'review', pr: { number: 7, url: 'u', headSha: 'sha1' },
+  });
+});
+
+test('precheck: pickup 3 → exit 3, claim stub not called, journal not created', async (t) => {
+  const stateDir = tmpDir();
+  t.after(() => cleanup(stateDir));
+  const { env, clLog } = writePrecheckStubs(stateDir, {
+    pkCode: 3, pkOut: JSON.stringify({ work: false, reason: 'none', issue: null }),
+    clCode: 0, clOut: { state: 'claimed', mode: 'implement' },
+  });
+  const rc = await main({
+    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
+    cwd: process.cwd(),
+    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
+  });
+  assert.equal(rc, 3);
+  assert.ok(!fs.existsSync(clLog));
+  assert.equal(readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) }).reason, 'MISSING');
+});
+
+test('precheck: claim 6 source_unavailable → exit 6 and the actual state is in the journal', async (t) => {
+  const stateDir = tmpDir();
+  t.after(() => cleanup(stateDir));
+  const { env } = writePrecheckStubs(stateDir, {
+    pkCode: 0, pkOut: JSON.stringify({ work: true, issue: { key: 'KAN-14' } }),
+    clCode: 6, clOut: { success: false, reason: 'source_unavailable', state: 'source_unavailable' },
+  });
+  const rc = await main({
+    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
+    cwd: process.cwd(),
+    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
+  });
+  assert.equal(rc, 6);
+  const jr = readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) });
+  assert.equal(jr.record.claim.state, 'source_unavailable');
+  assert.equal(jr.record.claim.mode, null);
+});

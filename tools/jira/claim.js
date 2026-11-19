@@ -494,11 +494,18 @@ export async function main({ argv, env } = {}) {
     });
   }
 
-  let prView;
+  // The answer is usable only if it is an object carrying a PR. The check runs BEFORE any field
+  // access: JSON.parse("null") does not throw. A list, string, number, null or an object carrying
+  // neither requested field (`number`, `state`) is an unreadable mandatory source → code 6.
+  let prView = null;
   try {
     prView = JSON.parse(prViewRes.stdout);
   } catch {
-    // JSON parse failed → source_unavailable, zero mutations
+    prView = null;
+  }
+  const prViewUsable = prView !== null && typeof prView === 'object' && !Array.isArray(prView)
+    && (prView.number !== undefined || prView.state !== undefined);
+  if (!prViewUsable) {
     exitJson(6, {
       success: false,
       reason: 'source_unavailable',
@@ -510,7 +517,7 @@ export async function main({ argv, env } = {}) {
     });
   }
 
-  const headRefOid = prView.headRefOid || null;
+  const headRefOid = (typeof prView.headRefOid === 'string' && prView.headRefOid) ? prView.headRefOid : null;
   const statusCheckRollup = prView.statusCheckRollup || null;
 
   // ----------------------------------------------------------------

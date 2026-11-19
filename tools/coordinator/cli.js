@@ -3,12 +3,27 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { acquire, release, status, heartbeat, forceRelease, lockDir } from './lock.js';
 import { read as readJournal, write } from './journal.js';
 
 const HEARTBEAT_INTERVAL_MS = 30000;
+
+// Claim states that allow the executor to start (contract: "Исполняемый маршрут запуска").
+const STARTABLE_CLAIM_STATES = { claimed: 'implement', review_pending: 'review', closing: 'close' };
+
+// Gate code for a claim state that does not allow a start.
+const CLAIM_STATE_CODES = {
+  blocked: 3, not_ready: 3,
+  awaiting_merge: 4, work_exists: 4,
+  readback_failed: 5,
+  source_unavailable: 6,
+  mutation_failed: 7,
+  usage: 2, not_found: 2,
+};
+
+const PRECHECK_TIMEOUT_MS = 120000;
 
 /** @type {string} */
 const STATE_DIR_VAR = 'COORDINATOR_STATE_DIR';
@@ -165,6 +180,9 @@ async function main({ argv, cwd, env } = {}) {
   }
 
   switch (command) {
+    case 'precheck':
+      return precheck({ args, stateDir, repoKey, cwd, env: myEnv });
+
     case 'start': {
       // Determine child command and extra args
       let childArgs = args;
@@ -187,6 +205,18 @@ async function main({ argv, cwd, env } = {}) {
       if (!childCmd) {
         process.stderr.write('Usage: cli.js start [-- cmd args...]\n');
         return 2;
+      }
+
+      // A non-empty claim in the journal that is not a successful capture means zero executor
+      // launches. A null or absent claim keeps the previous behavior.
+      const preStart = readJournal({ stateDir, repoKey });
+      if (preStart.ok && preStart.record && preStart.record.claim !== null && preStart.record.claim !== undefined) {
+        const c = preStart.record.claim;
+        const st = c && typeof c === 'object' ? c.state : undefined;
+        if (typeof st !== 'string' || !Object.prototype.hasOwnProperty.call(STARTABLE_CLAIM_STATES, st)) {
+          process.stderr.write('START_REFUSED: claim state is ' + JSON.stringify(st === undefined ? null : st) + '\n');
+          return Object.prototype.hasOwnProperty.call(CLAIM_STATE_CODES, st) ? CLAIM_STATE_CODES[st] : 1;
+        }
       }
 
       // Acquire lock
@@ -369,12 +399,129 @@ async function main({ argv, cwd, env } = {}) {
     }
 
     default: {
-      process.stderr.write('Usage: cli.js start|status|release|force-release|recover\n');
+      process.stderr.write('Usage: cli.js start|precheck|status|release|force-release|recover\n');
       return 2;
     }
   }
 
   return 0;
+}
+
+/** Parses the last JSON object printed on stdout; null when there is none. */
+function parseJsonOutput(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const candidates = [t, ...t.split('\n').map((l) => l.trim()).filter(Boolean).reverse()];
+  for (const c of candidates) {
+    try {
+      const v = JSON.parse(c);
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) return v;
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
+function runNodeScript({ script, argv, cwd, env }) {
+  const r = spawnSync(process.execPath, [script, ...argv], {
+    cwd: cwd || process.cwd(),
+    encoding: 'utf8',
+    timeout: PRECHECK_TIMEOUT_MS,
+    env: { ...process.env, ...(env || {}) },
+  });
+  return { code: r.error || r.status === null ? null : r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+function sortDeep(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = sortDeep(v[k]);
+    return o;
+  }
+  return v;
+}
+
+/**
+ * precheck: the only place where the launch is decided. pickup.js selects the work,
+ * claim.js --adopt-existing captures it, the result is written to the journal and read back.
+ * The exit code is the gate's; a result that could not be saved is code 5 even if the gate said 0.
+ */
+function precheck({ args, stateDir, repoKey, cwd, env }) {
+  const opt = (name) => { const i = args.indexOf(name); return i !== -1 && i + 1 < args.length ? args[i + 1] : null; };
+  const project = opt('--project');
+  const repo = opt('--repo');
+  if (!project || !repo) {
+    process.stderr.write('Usage: cli.js precheck --project K --repo o/n [--project-label pl] [--ci-grace-minutes N] [--base-branch b]\n');
+    return 2;
+  }
+  const toolsJira = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'jira');
+  const pickupScript = env.PRECHECK_PICKUP_SCRIPT || path.join(toolsJira, 'pickup.js');
+  const claimScript = env.PRECHECK_CLAIM_SCRIPT || path.join(toolsJira, 'claim.js');
+
+  const pickupArgs = ['--project', project, '--repo', repo, '--json'];
+  for (const f of ['--project-label', '--ci-grace-minutes', '--base-branch']) {
+    const v = opt(f);
+    if (v !== null) pickupArgs.push(f, v);
+  }
+  const pk = runNodeScript({ script: pickupScript, argv: pickupArgs, cwd, env });
+  if (pk.code === null || pk.code === 1) {
+    process.stderr.write('PRECHECK: pickup did not run to completion\n');
+    return 1;
+  }
+  if (pk.code !== 0) {
+    // 2, 3, 4 (and anything else non-zero): the gate is not called, the journal is not changed.
+    process.stdout.write(pk.stdout);
+    return pk.code;
+  }
+  const picked = parseJsonOutput(pk.stdout);
+  const issueKey = picked && picked.issue && typeof picked.issue.key === 'string' ? picked.issue.key : null;
+  if (!issueKey) {
+    // Code 0 without a selected issue is incomplete data: nothing may start.
+    process.stderr.write('PRECHECK: pickup returned 0 without an issue key\n');
+    return 4;
+  }
+
+  const cl = runNodeScript({
+    script: claimScript,
+    argv: ['--project', project, '--issue', issueKey, '--repo', repo, '--adopt-existing'],
+    cwd, env,
+  });
+  const out = parseJsonOutput(cl.stdout);
+  const state = out && typeof out.state === 'string' ? out.state : 'unknown';
+  const prOut = out && out.pr && typeof out.pr === 'object' ? out.pr : null;
+  const claim = {
+    issueKey,
+    state,
+    mode: out && typeof out.mode === 'string' ? out.mode : null,
+    pr: prOut
+      ? {
+        number: prOut.number === undefined ? null : prOut.number,
+        url: prOut.url === undefined ? null : prOut.url,
+        headSha: prOut.headSha !== undefined && prOut.headSha !== null ? prOut.headSha
+          : (out.readiness && out.readiness.headSha ? out.readiness.headSha : null),
+      }
+      : null,
+  };
+  const gateCode = cl.code === null ? 1 : cl.code;
+
+  // The result is saved in ANY outcome and read back by a fresh read.
+  let saved = false;
+  try {
+    write({ stateDir, repoKey, patch: { issueKey, claim } });
+    const jr = readJournal({ stateDir, repoKey });
+    saved = jr.ok && JSON.stringify(sortDeep(jr.record.claim)) === JSON.stringify(sortDeep(claim));
+  } catch { saved = false; }
+  if (!saved) {
+    process.stderr.write('PRECHECK: the claim result was not saved to the journal\n');
+    return 5;
+  }
+
+  // Code 0 with a state/mode pair that does not allow a start is not a successful gate.
+  if (gateCode === 0 && STARTABLE_CLAIM_STATES[state] !== claim.mode) {
+    process.stderr.write('PRECHECK: claim returned 0 with an unusable state/mode\n');
+    return 5;
+  }
+  process.stdout.write(cl.stdout);
+  return gateCode;
 }
 
 /**

@@ -370,6 +370,74 @@ test('write creates missing directories', () => {
   assert.ok(fs.existsSync(journalPath({ stateDir, repoKey })));
 });
 
+// ------------------------------------------------------------------
+// R3.1 — the journal carries the claim result
+// ------------------------------------------------------------------
+const CLAIM = {
+  issueKey: 'KAN-14',
+  state: 'review_pending',
+  mode: 'review',
+  pr: { number: 42, url: 'https://gh.test/o/r/pull/42', headSha: 'abc123def456' },
+};
+
+test('R3.1.1: claim is written and read back; fields match, checksum converges', () => {
+  const repoKey = 'claim-roundtrip';
+  const w = write({ stateDir, repoKey, patch: { claim: CLAIM } });
+  assert.equal(w.ok, true);
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.ok, true);
+  assert.deepStrictEqual(r.record.claim, CLAIM);
+  assert.equal(r.record.checksum, checksumOf(r.record));
+});
+
+test('R3.1.2: a journal of the previous format (no claim key) reads fine, claim is null', () => {
+  const repoKey = 'claim-legacy';
+  const w = write({ stateDir, repoKey, patch: { issueKey: 'KAN-1', stage: 'running' } });
+  // Rebuild the file exactly as the previous format wrote it: no `claim`, checksum over the old keys.
+  const legacy = { ...w.record };
+  delete legacy.claim;
+  legacy.checksum = checksumOf(legacy);
+  fs.writeFileSync(journalPath({ stateDir, repoKey }), JSON.stringify(legacy));
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.record.claim, null);
+  assert.equal(r.record.issueKey, 'KAN-1');
+  // and a write on top of a legacy record still works
+  const w2 = write({ stateDir, repoKey, patch: { claim: CLAIM } });
+  assert.deepStrictEqual(read({ stateDir, repoKey }).record.claim, w2.record.claim);
+});
+
+test('R3.1.3: tampering with a field inside claim without recomputing the checksum is detected', () => {
+  const repoKey = 'claim-tamper';
+  write({ stateDir, repoKey, patch: { claim: CLAIM } });
+  const fp = journalPath({ stateDir, repoKey });
+  for (const mutate of [
+    (c) => { c.state = 'claimed'; },
+    (c) => { c.mode = 'implement'; },
+    (c) => { c.pr.headSha = 'ffffff'; },
+  ]) {
+    const orig = fs.readFileSync(fp, 'utf8');
+    const rec = JSON.parse(orig);
+    mutate(rec.claim);
+    fs.writeFileSync(fp, JSON.stringify(rec));
+    const r = read({ stateDir, repoKey });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'CHECKSUM_MISMATCH');
+    fs.writeFileSync(fp, orig);
+  }
+  assert.equal(read({ stateDir, repoKey }).ok, true);
+});
+
+test('R3.1.4: a patch with an unknown key is still dropped (claim is the only added key)', () => {
+  const repoKey = 'claim-unknown';
+  const w = write({ stateDir, repoKey, patch: { claim: CLAIM, claims: 1, mode: 'implement' } });
+  assert.equal(w.ok, true);
+  const r = read({ stateDir, repoKey });
+  assert.ok(!('claims' in r.record));
+  assert.ok(!('mode' in r.record));
+  assert.deepStrictEqual(r.record.claim, CLAIM);
+});
+
 after(() => {
   try {
     if (fs.existsSync(stateDir)) {

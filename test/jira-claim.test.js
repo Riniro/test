@@ -747,7 +747,8 @@ describe('claim.js CLI', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'process.stdout.write(JSON.stringify([{ number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" }]) + "\\n");',
+      'var pr = { number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" };',
+      'process.stdout.write(JSON.stringify(process.argv[3] === "view" ? pr : [pr]));',
       'process.exit(0);',
     ].join(''));
     let mutationCalled = false;
@@ -804,7 +805,8 @@ describe('claim.js CLI', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'process.stdout.write(JSON.stringify([{ number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" }]) + "\\n");',
+      'var pr = { number: 42, state: "MERGED", title: "[KAN-1] Fix bug", headRefOid: "abc123" };',
+      'process.stdout.write(JSON.stringify(process.argv[3] === "view" ? pr : [pr]));',
       'process.exit(0);',
     ].join(''));
     let mutationCalled = false;
@@ -2883,4 +2885,116 @@ describe('claim.js — fix round 2', () => {
       assert.notStrictEqual(res.out.readiness.verdictSha, HEAD);
     });
   }
+});
+
+// ==========================================================================
+// R2 / R3.5 — unusable `gh pr view` answers and `mode` next to code 0
+// ==========================================================================
+
+describe('claim.js — gh pr view usability and mode (R2, R3.5)', () => {
+  // gh stub: `pr list` answers PR_LIST, `pr view` prints VIEW_RAW verbatim (any text, incl. "null").
+  async function adopt({ pr, viewRaw, comments = [], labels = ['project-test', 'ai-ready'], after = ['project-test', 'ai-in-review'], noPr = false }) {
+    const gh = mkTempDir('claim-r2');
+    const ghStub = path.join(gh, 'gh.js');
+    fs.writeFileSync(ghStub, [
+      'var a = process.argv.slice(2);',
+      'if (a[0] === "pr" && a[1] === "list") process.stdout.write(process.env.R2_LIST);',
+      'else if (a[0] === "pr" && a[1] === "view") process.stdout.write(process.env.R2_VIEW);',
+      'else if (a[0] === "api") process.stdout.write(JSON.stringify({ check_runs: [{ name: "build", status: "completed", conclusion: "success" }] }));',
+      'process.exit(0);',
+    ].join('\n'));
+    const calls = [];
+    const { server: srv, close } = await startServer(async (req, res) => {
+      calls.push(req.method + ' ' + req.url);
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (req.url.endsWith('/comment')) { res.end(JSON.stringify({ comments })); return; }
+        if (req.url.endsWith('/myself')) { res.end(JSON.stringify({ accountId: 'acc-1' })); return; }
+        const mutated = calls.some((c) => c.startsWith('PUT'));
+        res.end(JSON.stringify({ fields: { summary: 'S', status: { name: 'To Do' }, labels: mutated ? after : labels } }));
+      } else {
+        await drainBody(req);
+        res.writeHead(204); res.end();
+      }
+    });
+    const env = envForCli(gh, srv.address().port, ghStub);
+    env.R2_LIST = JSON.stringify(noPr ? [] : [pr]);
+    env.R2_VIEW = viewRaw === undefined ? '' : viewRaw;
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], env, 15000);
+      const writes = calls.filter((c) => c.startsWith('PUT') || c.startsWith('POST'));
+      return { r, writes, out: r.stdout.trim() ? JSON.parse(r.stdout) : null };
+    } finally { await close(); cleanup(gh); }
+  }
+  const OPEN = { number: 42, state: 'OPEN', title: '[KAN-1] x', url: 'https://gh.test/Riniro/test/pull/42' };
+  const MERGED = { ...OPEN, state: 'MERGED' };
+
+  function assertSourceUnavailable({ r, writes, out }) {
+    assert.strictEqual(r.status, 6, r.stdout + r.stderr);
+    assert.ok(out, 'stdout must be valid JSON');
+    assert.strictEqual(out.state, 'source_unavailable');
+    assert.strictEqual(out.success, false);
+    assert.deepStrictEqual(writes, [], 'no Jira writes');
+    assert.ok(!/TypeError/.test(r.stderr));
+  }
+
+  test('R2.1: body null (exit 0 of gh) → code 6 source_unavailable, valid JSON, zero Jira writes', async () => {
+    assertSourceUnavailable(await adopt({ pr: OPEN, viewRaw: 'null' }));
+  });
+  test('R2.2: body is a list → code 6', async () => {
+    assertSourceUnavailable(await adopt({ pr: OPEN, viewRaw: '[{"number":42,"state":"OPEN"}]' }));
+  });
+  test('R2.3a: body is a string → code 6', async () => {
+    assertSourceUnavailable(await adopt({ pr: OPEN, viewRaw: '"OPEN"' }));
+  });
+  test('R2.3b: body is a number → code 6', async () => {
+    assertSourceUnavailable(await adopt({ pr: OPEN, viewRaw: '42' }));
+  });
+  test('R2.4a: empty object {} for an open PR → code 6, neither awaiting_merge nor closing', async () => {
+    const x = await adopt({ pr: OPEN, viewRaw: '{}' });
+    assertSourceUnavailable(x);
+    assert.ok(!['awaiting_merge', 'closing'].includes(x.out.state));
+  });
+  test('R2.4b: empty object {} for a merged PR → code 6, not closing', async () => {
+    const x = await adopt({ pr: MERGED, viewRaw: '{}' });
+    assertSourceUnavailable(x);
+    assert.notStrictEqual(x.out.state, 'closing');
+  });
+  test('R2.5: object with number/state but no headRefOid, ACCEPT for some SHA → code 0 review_pending only', async () => {
+    const { r, out } = await adopt({
+      pr: OPEN,
+      viewRaw: JSON.stringify({ number: 42, state: 'OPEN' }),
+      comments: [{ id: '1', body: 'AI-REVIEW-VERDICT: ACCEPT sha=abc123def456 dispatch=ctx_abc task=task_abc run=run_abc', author: { accountId: 'acc-1' } }],
+    });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(out.state, 'review_pending');
+    assert.notStrictEqual(out.state, 'awaiting_merge');
+    assert.strictEqual(out.readiness.headSha, null);
+  });
+  test('R2.6: object with headRefOid → previous path (open PR, no verdict → review_pending with headSha)', async () => {
+    const { r, out } = await adopt({ pr: OPEN, viewRaw: JSON.stringify({ number: 42, state: 'OPEN', headRefOid: 'abc123def456' }) });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(out.state, 'review_pending');
+    assert.strictEqual(out.readiness.headSha, 'abc123def456');
+  });
+
+  // R3.5: code 0 is read together with mode; a found PR never yields implement.
+  test('R3.5a: PR not found → code 0, mode implement', async () => {
+    const { r, out } = await adopt({ noPr: true, viewRaw: '' });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(out.state, 'claimed');
+    assert.strictEqual(out.mode, 'implement');
+  });
+  test('R3.5b: open PR → code 0, mode review, never implement', async () => {
+    const { r, out } = await adopt({ pr: OPEN, viewRaw: JSON.stringify({ number: 42, state: 'OPEN', headRefOid: 'abc123def456' }) });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(out.mode, 'review');
+    assert.ok(!r.stdout.includes('implement'));
+  });
+  test('R3.5c: merged PR → code 0, mode close, never implement', async () => {
+    const { r, out } = await adopt({ pr: MERGED, after: ['project-test', 'ai-awaiting-merge'], viewRaw: JSON.stringify({ number: 42, state: 'MERGED', headRefOid: 'abc123def456' }) });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.strictEqual(out.mode, 'close');
+    assert.ok(!r.stdout.includes('implement'));
+  });
 });

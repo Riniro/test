@@ -240,3 +240,216 @@ test('a crashed CLI with a still-running child does not let a second coordinator
   assert.match(second.stdout, /BUSY/, 'второй координатор должен увидеть BUSY');
   assert.ok(!fs.existsSync(markerFile), 'второй координатор не должен запускать свою команду');
 });
+
+// ---------------------------------------------------------------------------
+// R3.2 / R3.3 / R3.4 — executable launch route: precheck, no start on a non-zero gate,
+// result read by a NEW process. pickup/claim are stub PROCESSES, not mocked modules.
+// ---------------------------------------------------------------------------
+import { pathToFileURL } from 'node:url';
+
+const CLI_URL = pathToFileURL(CLI).href;
+const JOURNAL_URL = pathToFileURL(path.join(REPO_ROOT, 'tools', 'coordinator', 'journal.js')).href;
+
+function runCliEnv(args, stateDir, extraEnv = {}) {
+  return spawnSync(process.execPath, [CLI, ...args], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: 30000,
+    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
+  });
+}
+
+/** Stub pickup/claim processes: print PK_OUT/CL_OUT, exit with PK_CODE/CL_CODE, log their argv when they run. */
+function writeStubs(scratch) {
+  const pickup = path.join(scratch, 'pickup-stub.mjs');
+  const claim = path.join(scratch, 'claim-stub.mjs');
+  fs.writeFileSync(pickup, [
+    "import fs from 'node:fs';",
+    "if (process.env.PK_LOG) fs.appendFileSync(process.env.PK_LOG, process.argv.slice(2).join(' ') + '\\n');",
+    "process.stdout.write((process.env.PK_OUT || '') + '\\n');",
+    'process.exit(Number(process.env.PK_CODE || 0));',
+  ].join('\n'));
+  fs.writeFileSync(claim, [
+    "import fs from 'node:fs';",
+    "if (process.env.CL_LOG) fs.appendFileSync(process.env.CL_LOG, process.argv.slice(2).join(' ') + '\\n');",
+    "process.stdout.write((process.env.CL_OUT || '') + '\\n');",
+    'process.exit(Number(process.env.CL_CODE || 0));',
+  ].join('\n'));
+  return { pickup, claim };
+}
+
+const PR = { number: 42, state: 'OPEN', url: 'https://gh.test/o/r/pull/42', headSha: 'abc123def456' };
+const PICKED = JSON.stringify({ work: true, reason: 'ready', issue: { key: 'KAN-14' }, pr: null, counts: {} });
+
+function precheckEnv(scratch, { claimCode, claimOut, pkCode = 0, pkOut = PICKED }) {
+  const stubs = writeStubs(scratch);
+  return {
+    PRECHECK_PICKUP_SCRIPT: stubs.pickup,
+    PRECHECK_CLAIM_SCRIPT: stubs.claim,
+    PK_CODE: String(pkCode), PK_OUT: pkOut,
+    CL_CODE: String(claimCode), CL_OUT: JSON.stringify(claimOut),
+    PK_LOG: path.join(scratch, 'pickup.log'),
+    CL_LOG: path.join(scratch, 'claim.log'),
+  };
+}
+
+/** Reads the journal claim in a FRESH process; returns it parsed. */
+function readClaimInNewProcess(scratch, stateDir) {
+  const script = path.join(scratch, 'read-claim.mjs');
+  fs.writeFileSync(script, [
+    `import { read } from ${JSON.stringify(JOURNAL_URL)};`,
+    `import { resolveRepoKey } from ${JSON.stringify(CLI_URL)};`,
+    `const repoKey = resolveRepoKey({ cwd: ${JSON.stringify(REPO_ROOT)} });`,
+    `const r = read({ stateDir: ${JSON.stringify(stateDir)}, repoKey });`,
+    'process.stdout.write(JSON.stringify(r.ok ? r.record.claim : { unreadable: r.reason }));',
+  ].join('\n'));
+  const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+function seedClaim(scratch, stateDir, claim) {
+  const script = path.join(scratch, 'seed-claim.mjs');
+  fs.writeFileSync(script, [
+    `import { write } from ${JSON.stringify(JOURNAL_URL)};`,
+    `import { resolveRepoKey } from ${JSON.stringify(CLI_URL)};`,
+    `const repoKey = resolveRepoKey({ cwd: ${JSON.stringify(REPO_ROOT)} });`,
+    `write({ stateDir: ${JSON.stringify(stateDir)}, repoKey, patch: { claim: ${JSON.stringify(claim)} } });`,
+  ].join('\n'));
+  const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(r.status, 0, r.stderr);
+}
+
+const PRECHECK_ARGS = ['precheck', '--project', 'KAN', '--repo', 'o/r'];
+
+const OK_CASES = [
+  ['claimed', 'implement', null],
+  ['review_pending', 'review', PR],
+  ['closing', 'close', { ...PR, state: 'MERGED' }],
+];
+
+for (const [state, mode, pr] of OK_CASES) {
+  test(`R3.2: claim 0 ${state}/${mode} → precheck 0, journal claim.state/mode match`, (t) => {
+    const stateDir = mkTmp('cli-pc-state-');
+    const scratch = mkTmp('cli-pc-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const env = precheckEnv(scratch, { claimCode: 0, claimOut: { success: true, state, reason: state, mode, pr } });
+    const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const claim = readClaimInNewProcess(scratch, stateDir);
+    assert.equal(claim.issueKey, 'KAN-14');
+    assert.equal(claim.state, state);
+    assert.equal(claim.mode, mode);
+    assert.deepStrictEqual(claim.pr, pr ? { number: 42, url: PR.url, headSha: 'abc123def456' } : null);
+    // the gate was asked about exactly the picked issue, with --adopt-existing
+    assert.match(fs.readFileSync(env.CL_LOG, 'utf8'), /--issue KAN-14 .*--adopt-existing/);
+  });
+}
+
+for (const [code, state] of [[2, 'not_found'], [3, 'blocked'], [3, 'not_ready'], [4, 'awaiting_merge'], [4, 'work_exists'],
+  [5, 'readback_failed'], [6, 'source_unavailable'], [7, 'mutation_failed']]) {
+  test(`R3.2: claim ${code} ${state} → precheck returns ${code} and the journal holds the actual state`, (t) => {
+    const stateDir = mkTmp('cli-pc-state-');
+    const scratch = mkTmp('cli-pc-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const env = precheckEnv(scratch, { claimCode: code, claimOut: { success: false, reason: state, state } });
+    const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+    assert.equal(r.status, code, r.stdout + r.stderr);
+    const claim = readClaimInNewProcess(scratch, stateDir);
+    assert.equal(claim.state, state);
+    assert.equal(claim.mode, null);
+  });
+}
+
+test('R3.2: journal write fails (state dir is not writable) while claim = 0 → precheck 5', (t) => {
+  const scratch = mkTmp('cli-pc-scratch-');
+  t.after(() => rmTmp(scratch));
+  // A FILE where the state directory should be: the journal cannot be created under it.
+  const stateDir = path.join(scratch, 'state-is-a-file');
+  fs.writeFileSync(stateDir, 'not a directory');
+  const env = precheckEnv(scratch, { claimCode: 0, claimOut: { success: true, state: 'claimed', reason: 'claimed', mode: 'implement', pr: null } });
+  const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+});
+
+for (const [pkCode, pkOut] of [[3, '{"work":false,"reason":"none","issue":null}'], [4, '{"work":false,"reason":"unavailable","issue":null}'], [2, '']]) {
+  test(`R3.2: pickup ${pkCode} → precheck ${pkCode}, journal untouched, claim stub never called`, (t) => {
+    const stateDir = mkTmp('cli-pc-state-');
+    const scratch = mkTmp('cli-pc-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const env = precheckEnv(scratch, { pkCode, pkOut, claimCode: 0, claimOut: { state: 'claimed', mode: 'implement' } });
+    const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+    assert.equal(r.status, pkCode, r.stdout + r.stderr);
+    assert.ok(!fs.existsSync(env.CL_LOG), 'the gate must not be called');
+    assert.ok(!fs.existsSync(stateDir) || fs.readdirSync(stateDir).length === 0, 'journal must not be created');
+  });
+}
+
+test('R3.2: pickup 0 without an issue key is not a permit: precheck 4, gate not called', (t) => {
+  const stateDir = mkTmp('cli-pc-state-');
+  const scratch = mkTmp('cli-pc-scratch-');
+  t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+  const env = precheckEnv(scratch, { pkOut: '{"work":true,"issue":null}', claimCode: 0, claimOut: { state: 'claimed', mode: 'implement' } });
+  const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+  assert.equal(r.status, 4);
+  assert.ok(!fs.existsSync(env.CL_LOG));
+});
+
+// R3.3 — a non-startable claim in the journal means zero executor processes.
+for (const state of ['source_unavailable', 'blocked', 'not_ready', 'awaiting_merge', 'work_exists', 'readback_failed', 'mutation_failed']) {
+  test(`R3.3: journal claim.state = ${state} → start spawns no child (no marker file)`, (t) => {
+    const stateDir = mkTmp('cli-st-state-');
+    const scratch = mkTmp('cli-st-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const markerFile = path.join(scratch, 'marker');
+    const markerChild = writeMarkerChild(scratch, markerFile);
+    seedClaim(scratch, stateDir, { issueKey: 'KAN-14', state, mode: null, pr: null });
+    const r = runCliEnv(['start', '--', process.execPath, markerChild], stateDir);
+    assert.notEqual(r.status, 0);
+    assert.ok(!fs.existsSync(markerFile), 'the executor must not have been started');
+  });
+}
+
+for (const state of ['review_pending', 'claimed', 'closing']) {
+  test(`R3.3: journal claim.state = ${state} → the child is started (marker created)`, (t) => {
+    const stateDir = mkTmp('cli-st-state-');
+    const scratch = mkTmp('cli-st-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const markerFile = path.join(scratch, 'marker');
+    const markerChild = writeMarkerChild(scratch, markerFile);
+    seedClaim(scratch, stateDir, { issueKey: 'KAN-14', state, mode: 'review', pr: null });
+    const r = runCliEnv(['start', '--', process.execPath, markerChild], stateDir);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(markerFile));
+  });
+}
+
+test('R3.3: journal without claim → start behaves as before (child runs)', (t) => {
+  const stateDir = mkTmp('cli-st-state-');
+  const scratch = mkTmp('cli-st-scratch-');
+  t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+  const markerFile = path.join(scratch, 'marker');
+  const r = runCliEnv(['start', '--', process.execPath, writeMarkerChild(scratch, markerFile)], stateDir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(fs.existsSync(markerFile));
+});
+
+// R3.4 — the record survives the process that made it
+test('R3.4: precheck process exits; a SECOND process reads claim.issueKey/state/mode', (t) => {
+  const stateDir = mkTmp('cli-pc-state-');
+  const scratch = mkTmp('cli-pc-scratch-');
+  t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+  const env = precheckEnv(scratch, { claimCode: 0, claimOut: { success: true, state: 'review_pending', reason: 'review_pending', mode: 'review', pr: PR } });
+  const first = runCliEnv(PRECHECK_ARGS, stateDir, env); // spawnSync: the first process has exited when it returns
+  assert.equal(first.status, 0, first.stderr);
+  const script = path.join(scratch, 'print-claim.mjs');
+  fs.writeFileSync(script, [
+    `import { read } from ${JSON.stringify(JOURNAL_URL)};`,
+    `import { resolveRepoKey } from ${JSON.stringify(CLI_URL)};`,
+    `const r = read({ stateDir: ${JSON.stringify(stateDir)}, repoKey: resolveRepoKey({ cwd: ${JSON.stringify(REPO_ROOT)} }) });`,
+    'console.log([r.record.claim.issueKey, r.record.claim.state, r.record.claim.mode].join(","));',
+  ].join('\n'));
+  const second = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stdout.trim(), 'KAN-14,review_pending,review');
+});

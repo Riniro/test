@@ -16,6 +16,7 @@ const KNOWN_KEYS = new Set([
   'commitSha',
   'prUrl',
   'lastConfirmedAction',
+  'claim',
   'updatedAt',
   'checksum',
 ]);
@@ -48,6 +49,9 @@ const DEFAULTS = {
   commitSha: null,
   prUrl: null,
   lastConfirmedAction: null,
+  // Result of the claim gate: null or { issueKey, state, mode, pr: { number, url, headSha } | null }.
+  // Deliberately NOT in REQUIRED_KEYS: journals of the previous format have no such field.
+  claim: null,
 };
 
 function journalPath({ stateDir, repoKey }) {
@@ -227,6 +231,11 @@ function read({ stateDir, repoKey }) {
   const expected = checksumOf(record);
   if (record.checksum !== expected) {
     return { ok: false, reason: 'CHECKSUM_MISMATCH' };
+  }
+
+  // A record of the previous format carries no `claim`: that is not damage, it reads as null.
+  if (!('claim' in record)) {
+    record = { ...record, claim: null };
   }
 
   return { ok: true, record };
