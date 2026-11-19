@@ -23,6 +23,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Arg parsing
 // ==========================================================================
 
+const VALUE_FLAGS = {
+  '--project': 'project',
+  '--issue': 'issue',
+  '--repo': 'repo',
+  '--transition-id': 'transitionId',
+  '--expect-status': 'expectStatus',
+};
+
+// An unknown argument, or a flag without a value, sets `invalid`: the caller asked for
+// something other than what would run, so the gate must stop (code 2) instead of guessing.
 function parseArgs(argv) {
   const a = {
     project: null,
@@ -31,16 +41,18 @@ function parseArgs(argv) {
     transitionId: null,
     expectStatus: null,
     adoptExisting: false,
+    invalid: false,
   };
-  let i = 0;
-  while (i < argv.length) {
+  for (let i = 0; i < argv.length; i++) {
     const x = argv[i];
-    if (x === '--project' && i + 1 < argv.length) { a.project = argv[++i]; i++; continue; }
-    if (x === '--issue' && i + 1 < argv.length) { a.issue = argv[++i]; i++; continue; }
-    if (x === '--repo' && i + 1 < argv.length) { a.repo = argv[++i]; i++; continue; }
-    if (x === '--transition-id' && i + 1 < argv.length) { a.transitionId = argv[++i]; i++; continue; }
-    if (x === '--expect-status' && i + 1 < argv.length) { a.expectStatus = argv[++i]; i++; continue; }
-    if (x === '--adopt-existing') { a.adoptExisting = true; i++; continue; }
+    if (x === '--adopt-existing') { a.adoptExisting = true; continue; }
+    const field = Object.prototype.hasOwnProperty.call(VALUE_FLAGS, x) ? VALUE_FLAGS[x] : null;
+    const value = argv[i + 1];
+    if (!field || value === undefined || value === '' || value.startsWith('--')) {
+      a.invalid = true;
+      break;
+    }
+    a[field] = value;
     i++;
   }
   return a;
@@ -92,7 +104,7 @@ function exitJson(statusCode, body) {
 
 async function searchPrsByKey(key, repo, env) {
   const res = await ghSpawn(
-    ['pr', 'list', '--search', key, '--state', 'all', '--json',
+    ['pr', 'list', '--repo', repo, '--search', key, '--state', 'all', '--json',
      'number,state,title,url', '--limit', '10'],
     env
   );
@@ -113,16 +125,40 @@ function keyInTitle(key, title) {
 // ciCheck — mandatory check-runs gate
 // ==========================================================================
 
-async function fetchCheckRunsForSha(mergeCommit, repo, env) {
-  const res = await ghSpawn(
-    ['api', 'repos/' + repo + '/commits/' + mergeCommit + '/check-runs'],
-    env
-  );
-  if (res.status !== 0 || !res.stdout) return [];
-  try {
-    const data = JSON.parse(res.stdout);
-    return Array.isArray(data) ? data : (data.check_runs || []);
-  } catch { return []; }
+const CHECK_RUNS_PER_PAGE = 100;
+const CHECK_RUNS_MAX_PAGES = 50;
+
+function ciUnavailable(why) {
+  const err = new Error('check-runs unavailable: ' + why);
+  err.code = 'SOURCE_UNAVAILABLE';
+  return err;
+}
+
+/**
+ * The FULL set of check-runs of a SHA (every page). A failed or unreadable answer is a
+ * failure of a mandatory source and throws SOURCE_UNAVAILABLE: it must never become an
+ * empty list, because an unknown result is not a negative one.
+ * (`gh api` has no --repo flag: the repository is part of the endpoint path.)
+ */
+async function fetchCheckRunsForSha(sha, repo, env) {
+  const all = [];
+  for (let page = 1; page <= CHECK_RUNS_MAX_PAGES; page++) {
+    const res = await ghSpawn(
+      ['api', 'repos/' + repo + '/commits/' + sha + '/check-runs',
+       '--method', 'GET', '-F', 'per_page=' + CHECK_RUNS_PER_PAGE, '-F', 'page=' + page],
+      env
+    );
+    if (res.status !== 0 || !res.stdout) throw ciUnavailable('gh api failed');
+    let data;
+    try { data = JSON.parse(res.stdout); } catch { throw ciUnavailable('unreadable response'); }
+    if (Array.isArray(data)) return data; // already a flat list, nothing to page through
+    if (!data || !Array.isArray(data.check_runs)) throw ciUnavailable('unexpected response');
+    all.push(...data.check_runs);
+    if (typeof data.total_count !== 'number' || all.length >= data.total_count || data.check_runs.length === 0) {
+      return all;
+    }
+  }
+  throw ciUnavailable('too many pages');
 }
 
 const DEFAULT_REQUIRED_CHECKS = ['Tests (ubuntu-latest)', 'Tests (windows-latest)'];
@@ -173,7 +209,8 @@ const VERDICT_RE = /^AI-REVIEW-VERDICT:\s*(ACCEPT|CHANGES_REQUIRED)\s+sha=([0-9a
  *    CHANGES_REQUIRED is negative. An earlier ACCEPT does not override a
  *    later negative verdict.
  * 5. If no positive verdict exists → review_pending.
- * 6. If getMyself or comment fetch failed → review_pending (not an error).
+ * 6. If getMyself or the comment fetch failed, main() stops with code 6 before this
+ *    function is reached: a failed source is not an empty list of comments.
  *
  * @param {Array<{ body: string, authorAccountId: string }>} comments — comment objects from getComments.
  * @param {string} accountId — the gate's own accountId from getMyself.
@@ -210,13 +247,20 @@ function extractVerdictSha(comments, accountId, headSha) {
 // Label mutation helper
 // ==========================================================================
 
-async function mutateLabels({ creds, key, beforeLabels, remove, add }) {
-  const after = beforeLabels
-    .filter((l) => !remove.includes(l))
-    .concat(add);
-  const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-  await client.setLabels({ creds, key, labels: after });
+// The label set to send: `remove` dropped, each `add` present exactly once.
+function planLabels(beforeLabels, remove, add) {
+  const after = beforeLabels.filter((l) => !remove.includes(l));
+  for (const l of add) if (!after.includes(l)) after.push(l);
   return after;
+}
+
+function sameLabelSet(a, b) {
+  return a.length === b.length && a.every((l) => b.includes(l));
+}
+
+async function mutateLabels({ creds, key, labels }) {
+  const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+  await client.setLabels({ creds, key, labels });
 }
 
 // ==========================================================================
@@ -249,7 +293,7 @@ export async function main({ argv, env } = {}) {
   const e = env || process.env;
 
   // --- Validate args ---
-  if (!args.project || !args.issue || !args.repo) {
+  if (args.invalid || !args.project || !args.issue || !args.repo) {
     exitJson(2, { success: false, reason: 'usage' });
   }
 
@@ -413,31 +457,12 @@ export async function main({ argv, env } = {}) {
 
   // Without --adopt-existing: return code 4, no mutations
   if (!args.adoptExisting) {
-    // Compute readiness even without adopting
-    let state = null;
-    let mode = null;
-    let readiness = null;
-
-    // We still need to check gh pr view for status — but per spec,
-    // without --adopt-existing we return code 4 with zero mutations.
-    // We can compute state/mode/readiness from the PR data alone.
-
-    // For OPEN PR: state=review_pending, mode=review (before we check readiness)
-    // For MERGED PR: state=closing, mode=close
-    if (foundPr.state === 'MERGED') {
-      state = 'closing';
-      mode = 'close';
-    } else {
-      state = 'review_pending';
-      mode = 'review';
-    }
-
+    // work_exists carries no `mode`: the decision to continue belongs to the caller,
+    // and a permissive mode in a refusal would read as permission.
     exitJson(4, {
       success: false,
       reason: 'work_exists',
       adopted: false,
-      state: state,
-      mode: mode,
       labelsBefore: labelsBefore,
       labelsAfter: labelsBefore,
       pr: { number: foundPr.number, state: foundPr.state, url: foundPr.url, headSha: null },
@@ -447,7 +472,7 @@ export async function main({ argv, env } = {}) {
 
   // With --adopt-existing: query gh pr view for status check
   const prViewRes = await ghSpawn(
-    ['pr', 'view', String(foundPr.number), '--json', 'number,state,headRefOid,statusCheckRollup'],
+    ['pr', 'view', String(foundPr.number), '--repo', args.repo, '--json', 'number,state,headRefOid,statusCheckRollup'],
     e
   );
 
@@ -490,25 +515,33 @@ export async function main({ argv, env } = {}) {
   let ciStatus = null; // null until a positive verdict triggers the CI request
   let confirmed = false;
 
-  // Fetch gate's own account and comments to find verdict
-  let accountId = null;
-  let comments = [];
-  try {
-    const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
-    const myself = await client.getMyself({ creds });
-    accountId = myself.accountId;
-    comments = await client.getComments({ creds, key: args.issue });
-  } catch {
-    // getMyself or comments unavailable — cannot confirm readiness; falls through to review_pending
-  }
+  // A merged PR needs no verdict, no comments and no CI: merge was done by a human.
+  // For an open PR every source is read BEFORE the first mutation, and a failed source
+  // stops the gate (code 6) instead of being treated as an empty result.
+  if (foundPr.state !== 'MERGED') {
+    let accountId = null;
+    let comments = [];
+    try {
+      const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+      const myself = await client.getMyself({ creds });
+      accountId = myself.accountId;
+      comments = await client.getComments({ creds, key: args.issue });
+    } catch {
+      exitJson(6, { success: false, reason: 'source_unavailable' });
+    }
 
-  if (comments.length > 0 && headRefOid && accountId) {
-    const result = extractVerdictSha(comments, accountId, headRefOid);
-    verdictSha = result.sha;
-    if (result.verdict === 'ACCEPT') {
-      ciStatus = await checkCiStatus(headRefOid, args.repo, e);
-      if (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === true) {
-        confirmed = true;
+    if (comments.length > 0 && headRefOid && accountId) {
+      const result = extractVerdictSha(comments, accountId, headRefOid);
+      verdictSha = result.sha;
+      if (result.verdict === 'ACCEPT') {
+        try {
+          ciStatus = await checkCiStatus(headRefOid, args.repo, e);
+        } catch {
+          exitJson(6, { success: false, reason: 'source_unavailable' });
+        }
+        if (verdictSha && verdictSha.toLowerCase() === headRefOid.toLowerCase() && ciStatus === true) {
+          confirmed = true;
+        }
       }
     }
   }
@@ -566,36 +599,37 @@ export async function main({ argv, env } = {}) {
   // ----------------------------------------------------------------
   // Perform label mutation
   // ----------------------------------------------------------------
-  let afterLabels;
-  try {
-    afterLabels = await mutateLabels({
-      creds,
-      key: args.issue,
-      beforeLabels: labelsBefore,
-      remove: removeLabels,
-      add: [targetLabel],
-    });
-  } catch (err) {
-    if (err.code === 'AUTH_FAILED') {
-      exitJson(6, { success: false, reason: 'source_unavailable' });
+  const plannedLabels = planLabels(labelsBefore, removeLabels, [targetLabel]);
+  let readbackLabels;
+
+  if (sameLabelSet(plannedLabels, labelsBefore)) {
+    // Nothing to change: no change request and nothing to confirm by readback.
+    readbackLabels = labelsBefore;
+  } else {
+    try {
+      await mutateLabels({ creds, key: args.issue, labels: plannedLabels });
+    } catch (err) {
+      if (err.code === 'AUTH_FAILED') {
+        exitJson(6, { success: false, reason: 'source_unavailable' });
+      }
+      exitJson(7, { success: false, reason: 'mutation_failed' });
     }
-    exitJson(7, { success: false, reason: 'mutation_failed' });
-  }
 
-  // ----------------------------------------------------------------
-  // Readback verification
-  // ----------------------------------------------------------------
-  let issueReadback;
-  try {
-    issueReadback = await readIssueBack({ creds, key: args.issue });
-  } catch {
-    exitJson(5, { success: false, reason: 'readback_failed' });
-  }
+    // ----------------------------------------------------------------
+    // Readback verification
+    // ----------------------------------------------------------------
+    let issueReadback;
+    try {
+      issueReadback = await readIssueBack({ creds, key: args.issue });
+    } catch {
+      exitJson(5, { success: false, reason: 'readback_failed' });
+    }
 
-  const readbackLabels = issueReadback.labels || [];
+    readbackLabels = issueReadback.labels || [];
 
-  if (!verifyReadback(readbackLabels, labelsBefore, [targetLabel], removeLabels)) {
-    exitJson(5, { success: false, reason: 'readback_failed' });
+    if (!verifyReadback(readbackLabels, labelsBefore, [targetLabel], removeLabels)) {
+      exitJson(5, { success: false, reason: 'readback_failed' });
+    }
   }
 
   exitJson(exitCode, {

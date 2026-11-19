@@ -1162,7 +1162,7 @@ describe('CLI process tests', () => {
   function noGhStub() {
     const d = mkTempDir('pick-gh-none');
     const stubPath = path.join(d, 'gh.js');
-    fs.writeFileSync(stubPath, 'process.stdout.write("[]\n");process.exit(0);');
+    fs.writeFileSync(stubPath, 'process.stdout.write("[]\\n");process.exit(0);');
     return { dir: d, stubPath };
   }
 
@@ -1236,6 +1236,181 @@ describe('CLI process tests', () => {
       assert.strictEqual(out.counts.inReview, null);
     } finally {
       cleanup(gh.dir);
+    }
+  });
+});
+
+// ==========================================================================
+// Fix round 2 — «Матрица очереди (pickup.js)»: priority is the action available
+// NOW (close → continue review → new work), and an issue with nothing to do
+// is skipped without stopping the queue.
+// ==========================================================================
+
+describe('queue priority matrix', () => {
+  const MERGED = (key, n) => ({
+    number: n, state: 'MERGED', title: '[' + key + '] work', url: 'https://gh.test/Riniro/test/pull/' + n,
+    baseRefName: 'master', headRepository: { full_name: 'Riniro/test' },
+    mergedAt: '2024-01-01T00:00:00Z', mergeCommit: 'm' + n,
+  });
+  const OPEN = (key, n) => ({ ...MERGED(key, n), state: 'OPEN', mergedAt: null, mergeCommit: null });
+  const issue = (key, ...labels) => ({ key, fields: { summary: key + ' summary', labels: ['project-test', ...labels] } });
+
+  /**
+   * @param {{ awaiting?: object[], inReview?: object[], ready?: object[], prs?: Record<string, object[]> }} cfg
+   */
+  async function run(cfg) {
+    const dir = mkTempDir('pick-q');
+    const stub = path.join(dir, 'gh.js');
+    const cfgPath = path.join(dir, 'cfg.json');
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg.prs || {}));
+    fs.writeFileSync(stub, [
+      'const fs = require("fs");',
+      'const a = process.argv.slice(2);',
+      'const prs = JSON.parse(fs.readFileSync(process.env.PQ_CFG, "utf8"));',
+      'if (a[0] === "pr" && a[1] === "list") {',
+      '  const key = a[a.indexOf("--search") + 1];',
+      '  process.stdout.write(JSON.stringify(prs[key] || []));',
+      '} else if (a[0] === "api") {',
+      '  process.stdout.write(JSON.stringify({ check_runs: [{ status: "completed", conclusion: "success" }] }));',
+      '} else {',
+      '  process.stdout.write("[]");',
+      '}',
+      'process.exit(0);',
+    ].join('\n'));
+    const jiraDir = mkTempDir('pick-qj');
+    const sd = mkTempDir('pick-qs');
+    const { server: srv, close } = await startServer((req, res) => {
+      const url = req.url || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      let issues = [];
+      if (url.includes('ai-in-review')) issues = cfg.inReview || [];
+      else if (url.includes('ai-awaiting-merge')) issues = cfg.awaiting || [];
+      else if (url.includes('ai-ready')) issues = cfg.ready || [];
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      PQ_CFG: cfgPath,
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  }
+
+  test('merged PR and an ai-in-review issue → the closing one is issued first', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      prs: { 'KAN-1': [MERGED('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.work, true);
+    assert.strictEqual(out.reason, 'closing');
+    assert.strictEqual(out.issue.key, 'KAN-1');
+  });
+
+  test('merged PR and an ai-ready issue → the closing one is issued first', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      ready: [issue('KAN-3', 'ai-ready')],
+      prs: { 'KAN-1': [MERGED('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.reason, 'closing');
+    assert.strictEqual(out.issue.key, 'KAN-1');
+  });
+
+  test('ai-in-review issue and an ai-ready issue → continuing the review is issued first', async () => {
+    const { status, out } = await run({
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      ready: [issue('KAN-3', 'ai-ready')],
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.reason, 'review');
+    assert.strictEqual(out.issue.key, 'KAN-2');
+  });
+
+  test('sole issue is an open PR with confirmed readiness → skipped, the queue is not stopped (code 3, not 4)', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 3);
+    assert.strictEqual(out.work, false);
+    assert.strictEqual(out.reason, 'awaiting_merge');
+    assert.strictEqual(out.issue, null);
+  });
+
+  test('issue with nothing to do first, available work after it → the available work is issued', async () => {
+    // KAN-1 is an open PR waiting for a human: nothing to do. KAN-4 follows it with a merged PR.
+    const closing = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge'), issue('KAN-4', 'ai-awaiting-merge')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)], 'KAN-4': [MERGED('KAN-4', 14)] },
+    });
+    assert.strictEqual(closing.status, 0);
+    assert.strictEqual(closing.out.reason, 'closing');
+    assert.strictEqual(closing.out.issue.key, 'KAN-4');
+
+    // The same waiting issue does not hide a review in progress…
+    const review = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(review.status, 0);
+    assert.strictEqual(review.out.reason, 'review');
+    assert.strictEqual(review.out.issue.key, 'KAN-2');
+
+    // …nor new work.
+    const ready = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      ready: [issue('KAN-3', 'ai-ready')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(ready.status, 0);
+    assert.strictEqual(ready.out.reason, 'ready');
+    assert.strictEqual(ready.out.issue.key, 'KAN-3');
+  });
+});
+
+describe('queue priority — gh unavailable', () => {
+  test('awaiting-merge issue cannot be evaluated (gh down) and a review exists → unavailable, not a lower-priority issue', async () => {
+    const dir = mkTempDir('pick-qg');
+    const stub = path.join(dir, 'gh.js');
+    fs.writeFileSync(stub, 'process.exit(1);');
+    const jiraDir = mkTempDir('pick-qgj');
+    const sd = mkTempDir('pick-qgs');
+    const { server: srv, close } = await startServer((req, res) => {
+      const url = req.url || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const mk = (k, l) => ({ key: k, fields: { summary: k, labels: ['project-test', l] } });
+      let issues = [];
+      if (url.includes('ai-in-review')) issues = [mk('KAN-2', 'ai-in-review')];
+      else if (url.includes('ai-awaiting-merge')) issues = [mk('KAN-1', 'ai-awaiting-merge')];
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      assert.strictEqual(r.status, 4);
+      assert.strictEqual(JSON.parse(r.stdout).reason, 'unavailable');
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
     }
   });
 });

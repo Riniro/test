@@ -536,19 +536,14 @@ export async function main({ argv, env } = {}) {
       }
     }
 
-    if (inReviewIssues.length > 0) {
-      printResult({
-        work: true, reason: 'review',
-        issue: { key: inReviewIssues[0].key, summary: inReviewIssues[0].summary, labels: inReviewIssues[0].labels },
-        pr: null,
-        counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: inReviewIssues.length },
-        exitCode: 0,
-      });
-      return;
-    }
-
     // ---- Process awaiting-merge ----
+    // Priority is the action available NOW: closing a merged PR, then continuing a
+    // started review, then new work. An issue with nothing to do (open PR waiting for
+    // a human, an already handled failure) is skipped and never stops the queue.
     let result = null;
+    let closeable = null; // first issue whose PR is merged and can be closed now
+    let skipped = null;   // first matched issue with nothing to do now
+    let unclear = null;   // first issue whose PR could not be identified
 
     for (const issue of awaitingIssues) {
       const ev = await evaluateAwaitingMergeIssue(issue, {
@@ -562,8 +557,8 @@ export async function main({ argv, env } = {}) {
         return;
       }
 
-      if (ev.prUnclear && !result) {
-        result = {
+      if (ev.prUnclear && !unclear) {
+        unclear = {
           work: false, reason: 'pr_unclear',
           issue: { key: issue.key, summary: issue.summary, labels: issue.labels },
           pr: null,
@@ -576,7 +571,7 @@ export async function main({ argv, env } = {}) {
       if (!ev.matched) continue; // no PR for this issue
 
       if (ev.prInfo) {
-        result = {
+        let candidate = {
           work: ev.work || false,
           reason: ev.reason,
           issue: ev.work ? { key: issue.key, summary: issue.summary, labels: issue.labels } : null,
@@ -585,24 +580,37 @@ export async function main({ argv, env } = {}) {
           exitCode: (ev.work) ? 0 : (ev.reason === 'closing_ci_stuck' || ev.reason === 'pr_unclear' ? 4 : 3),
           ciRunId: ev.ciRunId,
         };
-        break;
+        // An already handled CI failure is not closeable work: skip it, keep looking.
+        if (candidate.work && candidate.reason === 'closing_ci_failed') {
+          candidate = applyCiFailurePolicy(candidate, e, args.repo);
+        }
+        if (candidate.work) { closeable = candidate; break; }
+        if (!skipped) skipped = candidate;
+        continue;
       }
 
       // matched but no prInfo (no mergedAt / mergeCommit) — skip this issue
     }
 
-    // If we found a closeable item in awaiting-merge, apply the CI-failure policy.
-    // After the policy, a non-closeable result (work: false) does NOT block
-    // new work — continue to the ready check.
-    if (result && result.work && result.reason === 'closing_ci_failed') {
-      result = applyCiFailurePolicy(result, e, args.repo);
-    }
-
-    // If the result is still closeable, return it immediately
-    if (result && result.work) {
-      printResult(result);
+    // 1. Closing is the highest priority.
+    if (closeable) {
+      printResult(closeable);
       return;
     }
+
+    // 2. Continuing a started review.
+    if (inReviewIssues.length > 0) {
+      printResult({
+        work: true, reason: 'review',
+        issue: { key: inReviewIssues[0].key, summary: inReviewIssues[0].summary, labels: inReviewIssues[0].labels },
+        pr: null,
+        counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: inReviewIssues.length },
+        exitCode: 0,
+      });
+      return;
+    }
+
+    result = skipped || unclear;
 
     // Non-closeable matched PRs (awaiting_merge, closing_ci_pending,
     // closing_ci_failed_handled) do NOT block new work — "открытый PR

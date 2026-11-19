@@ -599,12 +599,10 @@ describe('claim.js CLI', () => {
       assert.strictEqual(out.success, false);
       assert.strictEqual(out.reason, 'readback_failed');
 
-      // Issue, myself, comments (verdict lookup), mutation, readback: in that order.
+      // Merged PR: no verdict lookup (no /myself, no comments); issue, mutation, readback in that order.
       const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
       assert.deepStrictEqual(calls.map((c) => c.method + ' ' + c.path), [
         'GET /rest/api/2/issue/KAN-1',
-        'GET /rest/api/2/myself',
-        'GET /rest/api/2/issue/KAN-1/comment',
         'PUT /rest/api/2/issue/KAN-1',
         'GET /rest/api/2/issue/KAN-1',
       ]);
@@ -1232,6 +1230,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1317,6 +1317,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1397,6 +1399,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1476,6 +1480,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1559,6 +1565,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1642,6 +1650,8 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
@@ -1702,13 +1712,13 @@ describe('claim.js CLI', () => {
     }
   });
 
-  // AC7: GET /myself вернул 500 → код 0, state: review_pending; падения нет
-  test('AC7: GET /myself returns 500 → code 0, review_pending, no crash', async () => {
+  // AC7: /myself недоступен — отказ обязательного источника: код 6, без мутаций.
+  // Прежнее ожидание (код 0, review_pending) подменяло отказ пустым результатом.
+  test('AC7: GET /myself returns 500 → code 6, source_unavailable, zero mutations', async () => {
     const gh = mkTempDir('acv7');
     const logPath = path.join(gh, 'gh-argv.jsonl');
     const jiraLog = path.join(gh, 'jira-calls.jsonl');
     const headSha = 'abcdef0123456789abcdef0123456789abcdef01';
-    const gateAccountId = 'abc123';
     fs.writeFileSync(path.join(gh, 'gh.js'), [
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
@@ -1723,10 +1733,11 @@ describe('claim.js CLI', () => {
       '    headRefOid: "' + headSha + '",',
       '    statusCheckRollup: null',
       '  }) + "\\n");',
+      '} else if (process.argv[2] === "api") {',
+      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n");',
       '}',
       'process.exit(0);',
     ].join(''));
-    let mutationCalled = false;
     const { server: srv, close: cs } = await startServer(async (req, res) => {
       fs.appendFileSync(jiraLog, JSON.stringify({ method: req.method, path: req.url }) + '\n');
       if (req.method === 'GET') {
@@ -1737,31 +1748,17 @@ describe('claim.js CLI', () => {
         }
         if (req.url.endsWith('/comment')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            comments: [],
-          }));
+          res.end(JSON.stringify({ comments: [] }));
           return;
         }
-        if (!mutationCalled) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
-          }));
-        } else {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
-          }));
-        }
-      } else if (req.method === 'PUT') {
-        await drainBody(req);
-        mutationCalled = true;
-        res.writeHead(204);
-        res.end();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+        }));
       } else {
         await drainBody(req);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({}));
+        res.writeHead(204);
+        res.end();
       }
     });
     const port = srv.address().port;
@@ -1771,10 +1768,14 @@ describe('claim.js CLI', () => {
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
       const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
-      assert.strictEqual(r.status, 0);
+      assert.strictEqual(r.status, 6);
       const out = JSON.parse(r.stdout);
-      assert.strictEqual(out.state, 'review_pending');
-      assert.strictEqual(out.readiness.verdictSha, null);
+      assert.strictEqual(out.success, false);
+      assert.strictEqual(out.reason, 'source_unavailable');
+      assert.strictEqual(out.state, 'source_unavailable');
+      // Zero mutations: no PUT, no POST — only reads reached Jira.
+      const calls = fs.readFileSync(jiraLog, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(calls.length > 0 && calls.every((c) => c.method === 'GET'), 'only GET requests: ' + JSON.stringify(calls));
     } finally {
       await cs();
       cleanup(gh);
@@ -2374,5 +2375,393 @@ describe('claim.js — mandatory check-runs gate', () => {
 
   after(() => {
     // No temp dirs to clean; each test cleans up in its own finally block.
+  });
+});
+
+// ==========================================================================
+// Fix round 2 — regression matrix rows added after the independent review.
+// One shared harness: a configurable gh stub and a stateful Jira server that
+// both log every request, so each test can assert WHICH calls happened.
+// ==========================================================================
+
+describe('claim.js — fix round 2', () => {
+  const HEAD = 'abcdef0123456789abcdef0123456789abcdef01';
+  const ME = 'gate123';
+  const UBUNTU = { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' };
+  const WINDOWS = { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' };
+  const OPEN_PR = { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' };
+  const MERGED_PR = { ...OPEN_PR, state: 'MERGED' };
+  const GOOD_BASE = ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'];
+
+  function accept(sha = HEAD, v = 'ACCEPT', author = ME) {
+    return {
+      id: String(Math.random()),
+      body: 'AI-REVIEW-VERDICT: ' + v + ' sha=' + sha + ' dispatch=ctx_abc task=task_abc run=run_abc',
+      author: { accountId: author },
+    };
+  }
+
+  const GH_STUB = [
+    'var fs = require("fs");',
+    'var a = process.argv.slice(2);',
+    'fs.appendFileSync(process.env.GH_ARGV_LOG, JSON.stringify(a) + "\\n");',
+    'var cfg = JSON.parse(fs.readFileSync(process.env.GH_CFG, "utf8"));',
+    'function out(x) { process.stdout.write(typeof x === "string" ? x : JSON.stringify(x)); process.exit(0); }',
+    // A failing gh may still have printed a plausible body: only the exit status says it failed.
+    'function fail(plausible) { if (plausible !== undefined) process.stdout.write(JSON.stringify(plausible)); process.stderr.write("gh: boom"); process.exit(1); }',
+    'if (a[0] === "pr" && a[1] === "list") { if (cfg.failList) fail(cfg.prs); out(cfg.prs); }',
+    'if (a[0] === "pr" && a[1] === "view") {',
+    '  var view = { number: cfg.prs[0].number, state: cfg.prs[0].state, headRefOid: cfg.head, statusCheckRollup: null };',
+    '  if (cfg.failView) fail(view);',
+    '  out(view);',
+    '}',
+    'if (a[0] === "api") {',
+    '  if (cfg.failChecks) fail({ total_count: cfg.checks.length, check_runs: cfg.checks });',
+    '  var page = 1;',
+    '  a.forEach(function (x) { var m = /^page=(\\d+)$/.exec(x); if (m) page = Number(m[1]); });',
+    '  if (cfg.failPage === page) fail(cfg.pages[page - 1]);',
+    '  if (cfg.raw !== undefined) out(cfg.raw);',
+    '  if (cfg.pages) out(cfg.pages[page - 1] || { total_count: cfg.total, check_runs: [] });',
+    '  out({ total_count: cfg.checks.length, check_runs: cfg.checks });',
+    '}',
+    'out("[]");',
+  ].join('\n');
+
+  /**
+   * Runs claim.js against the stubs. cfg: labels, status, prs, head, checks, pages, total,
+   * failList/failView/failChecks/failPage/raw, comments, myselfCode/commentCode/putCode/postCode, afterStatus.
+   */
+  async function scenario(cfg, args) {
+    const dir = mkTempDir('fr2');
+    fs.writeFileSync(path.join(dir, 'gh.js'), GH_STUB);
+    const ghCfg = path.join(dir, 'gh-cfg.json');
+    const ghLog = path.join(dir, 'gh-argv.jsonl');
+    fs.writeFileSync(ghCfg, JSON.stringify({
+      prs: cfg.prs || [], head: cfg.head === undefined ? HEAD : cfg.head, checks: cfg.checks || [UBUNTU, WINDOWS],
+      pages: cfg.pages, total: cfg.total, failList: cfg.failList, failView: cfg.failView,
+      failChecks: cfg.failChecks, failPage: cfg.failPage, raw: cfg.raw,
+    }));
+    fs.writeFileSync(ghLog, '');
+    const state = { labels: (cfg.labels || ['project-test', 'review', 'ai-ready']).slice(), status: cfg.status || 'To Do' };
+    const jira = [];
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      const body = await drainBody(req);
+      jira.push({ method: req.method, url: req.url.split('?')[0], body: body || '' });
+      const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (req.method === 'GET') {
+        if (req.url.endsWith('/myself')) return cfg.myselfCode >= 400 ? json(cfg.myselfCode, {}) : json(200, { accountId: ME });
+        if (req.url.endsWith('/comment')) return cfg.commentCode >= 400 ? json(cfg.commentCode, {}) : json(200, { comments: cfg.comments || [] });
+        return json(200, { fields: { summary: 'Test issue', status: { name: state.status }, labels: state.labels } });
+      }
+      if (req.method === 'PUT') {
+        if (cfg.putCode >= 400) return json(cfg.putCode, { error: 'no' });
+        try { state.labels = JSON.parse(body).fields.labels; } catch { /* keep */ }
+        res.writeHead(204); res.end(); return;
+      }
+      if (cfg.postCode >= 400) return json(cfg.postCode, { error: 'no' });
+      state.status = cfg.afterStatus || 'In Review';
+      res.writeHead(204); res.end();
+    });
+    const env = { ...envForCli(dir, srv.address().port, path.join(dir, 'gh.js')), GH_CFG: ghCfg, GH_ARGV_LOG: ghLog, ...(cfg.env || {}) };
+    try {
+      const r = await runSpawn(CLI, args, env, 15000);
+      let out = null;
+      try { out = JSON.parse(r.stdout); } catch { /* not json */ }
+      const gh = fs.readFileSync(ghLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+      return { status: r.status, out, jira, gh, state, seq: jira.map((c) => c.method + ' ' + c.url.replace('/rest/api/2', '')) };
+    } finally {
+      await cs();
+      cleanup(dir);
+    }
+  }
+
+  const writes = (res) => res.jira.filter((c) => c.method !== 'GET');
+  const adopt = [...GOOD_BASE, '--adopt-existing'];
+  const INITIAL_LABELS = ['project-test', 'review', 'ai-ready'];
+
+  // ---- MAJOR 1 — gh unavailable / write auth refused ------------------------------------------
+
+  test('M1: gh pr list unavailable → code 6 source_unavailable, no Jira writes', async () => {
+    const res = await scenario({ prs: [OPEN_PR], failList: true }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.strictEqual(res.out.success, false);
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('M1: gh pr view unavailable (--adopt-existing) → code 6 source_unavailable, no Jira writes', async () => {
+    const res = await scenario({ prs: [OPEN_PR], failView: true }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.ok(res.gh.some((a) => a[0] === 'pr' && a[1] === 'view'), 'pr view was attempted');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('M1: labels write refused with 401, no PR → code 6; nothing succeeded or followed', async () => {
+    const res = await scenario({ prs: [], putCode: 401 }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', 'In Review']);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    // The PUT was sent and refused; nothing may follow it: no readback, no transition.
+    assert.deepStrictEqual(res.seq, ['GET /issue/KAN-1', 'PUT /issue/KAN-1']);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS, 'Jira labels unchanged');
+    assert.strictEqual(res.state.status, 'To Do');
+  });
+
+  test('M1: labels write refused with 401, open PR → code 6; nothing succeeded or followed', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [], putCode: 401 }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.strictEqual(res.seq[res.seq.length - 1], 'PUT /issue/KAN-1', 'the refused PUT is the last Jira request');
+    assert.strictEqual(res.seq.filter((s) => s.startsWith('PUT')).length, 1);
+    assert.ok(!res.seq.some((s) => s.startsWith('POST')), 'no transition');
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS, 'Jira labels unchanged');
+  });
+
+  // ---- MAJOR 2 — SHA case ------------------------------------------------------------------------
+
+  test('M2: verdict SHA upper case, head lower case → code 4 awaiting_merge', async () => {
+    const res = await scenario({ prs: [OPEN_PR], head: HEAD, comments: [accept(HEAD.toUpperCase())] }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+  });
+
+  test('M2: verdict SHA lower case, head upper case → code 4 awaiting_merge', async () => {
+    const res = await scenario({ prs: [OPEN_PR], head: HEAD.toUpperCase(), comments: [accept(HEAD)] }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+  });
+
+  // ---- MAJOR 3 — a failed mandatory source is not an empty result -------------------------------
+
+  test('M3: /myself unavailable → code 6, zero mutations', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], myselfCode: 500 }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('M3: comments unavailable → code 6, zero mutations', async () => {
+    const res = await scenario({ prs: [OPEN_PR], commentCode: 500 }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('M3: gh api check-runs exits non-zero → code 6, zero mutations (not ci:false)', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], failChecks: true }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+    assert.strictEqual(res.state.status, 'To Do');
+  });
+
+  test('M3: gh api check-runs returns an unreadable body → code 6, zero mutations', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], raw: '<html>not json</html>' }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+  });
+
+  test('M3: gh api check-runs returns an empty body → code 6, zero mutations', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], raw: '' }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.deepStrictEqual(writes(res), []);
+  });
+
+  test('M3: a successful answer without the required check still means ci:false, review_pending', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], checks: [UBUNTU] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.state, 'review_pending');
+    assert.strictEqual(res.out.readiness.ci, false);
+    assert.ok(res.state.labels.includes('ai-in-review'));
+  });
+
+  // ---- MINOR 4 — no duplicate labels ------------------------------------------------------------
+
+  test('m4: closing with ai-awaiting-merge already set → the sent label set has no duplicates', async () => {
+    const res = await scenario({ prs: [MERGED_PR], labels: ['project-test', 'ai-ready', 'ai-awaiting-merge'] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.state, 'closing');
+    const puts = res.jira.filter((c) => c.method === 'PUT');
+    assert.strictEqual(puts.length, 1);
+    const sent = JSON.parse(puts[0].body).fields.labels;
+    assert.deepStrictEqual(sent, ['project-test', 'ai-awaiting-merge']);
+    assert.strictEqual(new Set(sent).size, sent.length);
+  });
+
+  // ---- MINOR 5 — work_exists carries no mode -----------------------------------------------------
+
+  for (const pr of [OPEN_PR, MERGED_PR]) {
+    test('m5: ' + pr.state + ' PR without --adopt-existing → code 4 work_exists, no mode, state kept', async () => {
+      const res = await scenario({ prs: [pr] }, GOOD_BASE);
+      assert.strictEqual(res.status, 4);
+      assert.strictEqual(res.out.reason, 'work_exists');
+      assert.strictEqual(res.out.state, 'work_exists');
+      assert.ok(!('mode' in res.out), 'work_exists must not carry a mode: ' + JSON.stringify(res.out));
+      assert.deepStrictEqual(writes(res), []);
+    });
+  }
+
+  // ---- MINOR 6 — a merged PR needs no verdict, comments or CI -----------------------------------
+
+  test('m6: merged PR → no /myself, no comments, no check-runs requests', async () => {
+    const res = await scenario({ prs: [MERGED_PR], labels: ['project-test', 'ai-ready'] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.state, 'closing');
+    assert.ok(!res.seq.some((s) => s.endsWith('/myself') || s.endsWith('/comment')), 'Jira calls: ' + res.seq.join(' | '));
+    assert.ok(!res.gh.some((a) => a[0] === 'api'), 'no gh api call for a merged PR');
+    assert.ok(res.state.labels.includes('ai-awaiting-merge'));
+  });
+
+  // ---- MINOR 7 — --repo, argument parsing, full check-run set -----------------------------------
+
+  test('m7: --repo is present in every gh call', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()] }, adopt);
+    assert.strictEqual(res.status, 4);
+    const kinds = new Set(res.gh.map((a) => a[0] + ' ' + (a[0] === 'pr' ? a[1] : '')));
+    assert.ok(kinds.has('pr list') && kinds.has('pr view') && kinds.has('api '), 'all three gh calls made: ' + [...kinds]);
+    for (const a of res.gh) {
+      if (a[0] === 'api') {
+        // `gh api` has no --repo flag: the repository is part of the endpoint path.
+        assert.ok(a.some((x) => x.startsWith('repos/Riniro/test/')), 'api call addresses the repo: ' + JSON.stringify(a));
+      } else {
+        const i = a.indexOf('--repo');
+        assert.ok(i !== -1 && a[i + 1] === 'Riniro/test', 'missing --repo: ' + JSON.stringify(a));
+      }
+    }
+  });
+
+  test('m7: unknown flag → code 2 usage, zero Jira requests, zero gh calls', async () => {
+    const res = await scenario({ prs: [] }, [...GOOD_BASE, '--bogus']);
+    assert.strictEqual(res.status, 2);
+    assert.strictEqual(res.out.reason, 'usage');
+    assert.strictEqual(res.out.state, 'usage');
+    assert.deepStrictEqual(res.jira, []);
+    assert.deepStrictEqual(res.gh, []);
+  });
+
+  test('m7: unknown positional argument → code 2 usage, zero requests', async () => {
+    const res = await scenario({ prs: [] }, [...GOOD_BASE, 'stray']);
+    assert.strictEqual(res.status, 2);
+    assert.strictEqual(res.out.reason, 'usage');
+    assert.deepStrictEqual(res.jira, []);
+  });
+
+  test('m7: trailing flag without a value → code 2 usage, zero requests', async () => {
+    for (const tail of ['--transition-id', '--expect-status', '--project', '--issue', '--repo']) {
+      const base = tail === '--project' ? ['--issue', 'KAN-1', '--repo', 'Riniro/test']
+        : tail === '--issue' ? ['--project', 'KAN', '--repo', 'Riniro/test']
+          : tail === '--repo' ? ['--project', 'KAN', '--issue', 'KAN-1'] : GOOD_BASE;
+      const res = await scenario({ prs: [] }, [...base, tail]);
+      assert.strictEqual(res.status, 2, tail);
+      assert.strictEqual(res.out.reason, 'usage', tail);
+      assert.deepStrictEqual(res.jira, [], tail);
+      assert.deepStrictEqual(res.gh, [], tail);
+    }
+  });
+
+  test('m7: a flag followed by another flag (value missing) → code 2 usage, zero requests', async () => {
+    const res = await scenario({ prs: [] }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', '--adopt-existing']);
+    assert.strictEqual(res.status, 2);
+    assert.strictEqual(res.out.reason, 'usage');
+    assert.deepStrictEqual(res.jira, []);
+  });
+
+  const LINT = { name: 'lint', status: 'completed', conclusion: 'success' };
+
+  test('m7: required check on the second page of check-runs is found → code 4 awaiting_merge', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 3, check_runs: [UBUNTU, LINT] },
+        { total_count: 3, check_runs: [WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+    assert.ok(res.gh.filter((a) => a[0] === 'api').length >= 2, 'more than one page requested');
+  });
+
+  test('m7: second page of check-runs unavailable → code 6, zero mutations', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()], failPage: 2,
+      pages: [
+        { total_count: 3, check_runs: [UBUNTU, LINT] },
+        { total_count: 3, check_runs: [WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+  });
+
+  // ---- MINOR 8 — no pointless PUT ------------------------------------------------------------------
+
+  test('m8: awaiting_merge with labels already in the target state → no PUT, no readback', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], labels: ['project-test', 'review', 'ai-awaiting-merge'] }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.seq, ['GET /issue/KAN-1', 'GET /myself', 'GET /issue/KAN-1/comment']);
+    assert.deepStrictEqual(res.out.labelsAfter, ['project-test', 'review', 'ai-awaiting-merge']);
+  });
+
+  test('m8: review_pending with ai-in-review already set → no PUT, no readback', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [], labels: ['project-test', 'ai-in-review'] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.state, 'review_pending');
+    assert.deepStrictEqual(writes(res), []);
+    assert.strictEqual(res.seq.filter((s) => s === 'GET /issue/KAN-1').length, 1, 'no readback of the issue');
+  });
+
+  test('m8: closing with ai-awaiting-merge already set → no PUT, no readback', async () => {
+    const res = await scenario({ prs: [MERGED_PR], labels: ['project-test', 'ai-awaiting-merge'] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.state, 'closing');
+    assert.deepStrictEqual(res.seq, ['GET /issue/KAN-1']);
+  });
+
+  test('m8: a changing label set is still written and read back', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], labels: ['project-test', 'ai-in-review'] }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.deepStrictEqual(res.seq, [
+      'GET /issue/KAN-1', 'GET /myself', 'GET /issue/KAN-1/comment', 'PUT /issue/KAN-1', 'GET /issue/KAN-1',
+    ]);
+    assert.deepStrictEqual(res.out.labelsAfter, ['project-test', 'ai-awaiting-merge']);
+  });
+
+  // ---- MINOR 9 — readback order --------------------------------------------------------------------
+
+  test('m9: labels readback follows the labels write, status readback follows the transition', async () => {
+    const res = await scenario({ prs: [] }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', 'In Review']);
+    assert.strictEqual(res.status, 0);
+    assert.deepStrictEqual(res.seq, [
+      'GET /issue/KAN-1',               // initial read
+      'PUT /issue/KAN-1',               // labels written
+      'GET /issue/KAN-1',               // labels readback — after the write
+      'POST /issue/KAN-1/transitions',  // transition
+      'GET /issue/KAN-1',               // status readback — after the transition
+    ]);
+    assert.strictEqual(res.out.statusAfter, 'In Review');
+  });
+
+  test('m9: adopt path — readback of labels is the request right after the write', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [] }, adopt);
+    assert.strictEqual(res.status, 0);
+    assert.deepStrictEqual(res.seq, [
+      'GET /issue/KAN-1', 'GET /myself', 'GET /issue/KAN-1/comment', 'PUT /issue/KAN-1', 'GET /issue/KAN-1',
+    ]);
   });
 });
