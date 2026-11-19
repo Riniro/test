@@ -147,6 +147,7 @@ describe('claim.js CLI', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]");',
       'process.exit(0);',
     ].join(''));
     const { server: srv, close: cs } = await startServer((req, res) => {
@@ -368,6 +369,7 @@ describe('claim.js CLI', () => {
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]");',
       'process.exit(0);',
     ].join(''));
     const { server: srv, close: cs } = await startServer(async (req, res) => {
@@ -2409,7 +2411,7 @@ describe('claim.js — fix round 2', () => {
     'function out(x) { process.stdout.write(typeof x === "string" ? x : JSON.stringify(x)); process.exit(0); }',
     // A failing gh may still have printed a plausible body: only the exit status says it failed.
     'function fail(plausible) { if (plausible !== undefined) process.stdout.write(JSON.stringify(plausible)); process.stderr.write("gh: boom"); process.exit(1); }',
-    'if (a[0] === "pr" && a[1] === "list") { if (cfg.failList) fail(cfg.prs); out(cfg.prs); }',
+    'if (a[0] === "pr" && a[1] === "list") { if (cfg.failList) fail(cfg.prs); if (cfg.rawList !== undefined) out(cfg.rawList); out(cfg.prs); }',
     'if (a[0] === "pr" && a[1] === "view") {',
     '  var view = { number: cfg.prs[0].number, state: cfg.prs[0].state, headRefOid: cfg.head, statusCheckRollup: null };',
     '  if (cfg.failView) fail(view);',
@@ -2421,6 +2423,7 @@ describe('claim.js — fix round 2', () => {
     '  a.forEach(function (x) { var m = /^page=(\\d+)$/.exec(x); if (m) page = Number(m[1]); });',
     '  if (cfg.failPage === page) fail(cfg.pages[page - 1]);',
     '  if (cfg.raw !== undefined) out(cfg.raw);',
+    '  if (cfg.endless) out({ total_count: 100000, check_runs: [{ name: "Tests (ubuntu-latest)", status: "completed", conclusion: "success" }] });',
     '  if (cfg.pages) out(cfg.pages[page - 1] || { total_count: cfg.total, check_runs: [] });',
     '  out({ total_count: cfg.checks.length, check_runs: cfg.checks });',
     '}',
@@ -2439,7 +2442,7 @@ describe('claim.js — fix round 2', () => {
     fs.writeFileSync(ghCfg, JSON.stringify({
       prs: cfg.prs || [], head: cfg.head === undefined ? HEAD : cfg.head, checks: cfg.checks || [UBUNTU, WINDOWS],
       pages: cfg.pages, total: cfg.total, failList: cfg.failList, failView: cfg.failView,
-      failChecks: cfg.failChecks, failPage: cfg.failPage, raw: cfg.raw,
+      failChecks: cfg.failChecks, failPage: cfg.failPage, raw: cfg.raw, rawList: cfg.rawList, endless: cfg.endless,
     }));
     fs.writeFileSync(ghLog, '');
     const state = { labels: (cfg.labels || ['project-test', 'review', 'ai-ready']).slice(), status: cfg.status || 'To Do' };
@@ -2764,4 +2767,120 @@ describe('claim.js — fix round 2', () => {
       'GET /issue/KAN-1', 'GET /myself', 'GET /issue/KAN-1/comment', 'PUT /issue/KAN-1', 'GET /issue/KAN-1',
     ]);
   });
+
+  // ==== Round 3 ======================================================================================
+
+  // ---- R4 (M3) — an unreadable `gh pr list` answer is not "no PR" -----------------------------------
+
+  for (const [label, raw] of [['empty stdout', ''], ['<html> body', '<html>oops</html>'], ['{} (not a list)', '{}'], ['null', 'null'], ['a string', '"x"']]) {
+    test('R4: gh pr list code 0 with ' + label + ' → code 6 source_unavailable, zero Jira writes, ai-ready kept', async () => {
+      const res = await scenario({ prs: [], rawList: raw }, GOOD_BASE);
+      assert.strictEqual(res.status, 6);
+      assert.strictEqual(res.out.reason, 'source_unavailable');
+      assert.strictEqual(res.out.state, 'source_unavailable');
+      assert.strictEqual(res.out.success, false);
+      assert.deepStrictEqual(writes(res), []);
+      assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+    });
+  }
+
+  test('R4: unreadable gh pr list stops the --adopt-existing path as well → code 6, zero writes', async () => {
+    const res = await scenario({ prs: [], rawList: '<html>oops</html>' }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('R4: control — a proper empty list means "no PR" → code 0 claimed, ai-ready removed', async () => {
+    const res = await scenario({ prs: [], rawList: '[]' }, GOOD_BASE);
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.reason, 'claimed');
+    assert.deepStrictEqual(res.state.labels, ['project-test', 'review']);
+  });
+
+  // ---- R5 (M4) — a failed labels write is checked on both paths ----------------------------------------
+
+  test('R5: labels write 500, normal path → code 7 mutation_failed; no readback, no transition', async () => {
+    const res = await scenario({ prs: [], putCode: 500 }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', 'In Review']);
+    assert.strictEqual(res.status, 7);
+    assert.strictEqual(res.out.reason, 'mutation_failed');
+    assert.strictEqual(res.out.state, 'mutation_failed');
+    assert.deepStrictEqual(res.seq, ['GET /issue/KAN-1', 'PUT /issue/KAN-1']);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+    assert.strictEqual(res.state.status, 'To Do');
+  });
+
+  test('R5: labels write 500, --adopt-existing path → code 7 mutation_failed; no readback', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [], putCode: 500 }, adopt);
+    assert.strictEqual(res.status, 7);
+    assert.strictEqual(res.out.reason, 'mutation_failed');
+    assert.strictEqual(res.out.state, 'mutation_failed');
+    assert.strictEqual(res.out.success, false);
+    assert.strictEqual(res.seq[res.seq.length - 1], 'PUT /issue/KAN-1', 'the failed PUT is the last Jira request');
+    assert.strictEqual(res.seq.filter((s) => s.startsWith('PUT')).length, 1);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('R5: labels write 401, merged PR on the --adopt-existing path → code 6; nothing followed', async () => {
+    const res = await scenario({ prs: [MERGED_PR], putCode: 401 }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.seq[res.seq.length - 1], 'PUT /issue/KAN-1');
+    assert.ok(!res.seq.some((s) => s.startsWith('POST')), 'no transition');
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  // ---- R9 — coverage of already implemented behaviour ----------------------------------------------------
+
+  test('R9: check-runs answer without a check_runs array → code 6, zero writes (not ci:false)', async () => {
+    for (const raw of ['{"total_count":1}', '{"check_runs":"x"}', 'null']) {
+      const res = await scenario({ prs: [OPEN_PR], comments: [accept()], raw }, adopt);
+      assert.strictEqual(res.status, 6, raw);
+      assert.strictEqual(res.out.reason, 'source_unavailable', raw);
+      assert.deepStrictEqual(writes(res), [], raw);
+      assert.deepStrictEqual(res.state.labels, INITIAL_LABELS, raw);
+    }
+  });
+
+  test('R9: page ceiling reached (total_count above what is served) → code 6, 50 pages asked, zero writes', async () => {
+    const res = await scenario({ prs: [OPEN_PR], comments: [accept()], endless: true }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.gh.filter((a) => a[0] === 'api').length, 50);
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('R9: 401 on the transition request → code 6; labels were written, status unchanged, no readback after it', async () => {
+    const res = await scenario({ prs: [], postCode: 401 }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', 'In Review']);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(res.seq, ['GET /issue/KAN-1', 'PUT /issue/KAN-1', 'GET /issue/KAN-1', 'POST /issue/KAN-1/transitions']);
+    assert.strictEqual(res.state.status, 'To Do');
+  });
+
+  test('R9: --expect-status ignores case and surrounding spaces → code 0', async () => {
+    for (const expected of ['in review', '  IN REVIEW  ', ' In Review']) {
+      const res = await scenario({ prs: [] }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', expected]);
+      assert.strictEqual(res.status, 0, JSON.stringify(expected));
+      assert.strictEqual(res.out.reason, 'claimed');
+    }
+    const res = await scenario({ prs: [], afterStatus: '  in review ' }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', 'IN REVIEW']);
+    assert.strictEqual(res.status, 0, 'actual status with spaces and another case');
+  });
+
+  for (const missing of ['dispatch', 'task', 'run']) {
+    test('R9: verdict line without ' + missing + '= is ignored → review_pending', async () => {
+      const ids = { dispatch: 'ctx_abc', task: 'task_abc', run: 'run_abc' };
+      delete ids[missing];
+      const body = 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD + ' ' + Object.entries(ids).map(([k, v]) => k + '=' + v).join(' ');
+      const res = await scenario({ prs: [OPEN_PR], comments: [{ id: '1', body, author: { accountId: ME } }] }, adopt);
+      assert.strictEqual(res.status, 0);
+      assert.strictEqual(res.out.state, 'review_pending');
+      assert.strictEqual(res.out.mode, 'review');
+      assert.notStrictEqual(res.out.readiness.verdictSha, HEAD);
+    });
+  }
 });

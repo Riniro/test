@@ -108,8 +108,13 @@ async function searchPrsByKey(key, repo, env) {
      'number,state,title,url', '--limit', '10'],
     env
   );
-  if (res.status !== 0) return null;
-  try { return JSON.parse(res.stdout) || []; } catch { return []; }
+  // Only a readable list answers the question. Empty stdout, invalid JSON or a structure that is
+  // not a list is a failed source (null), never "no PR": only a proper empty list means that.
+  if (res.status !== 0 || !res.stdout || !res.stdout.trim()) return null;
+  try {
+    const data = JSON.parse(res.stdout);
+    return Array.isArray(data) ? data : null;
+  } catch { return null; }
 }
 
 // ==========================================================================
@@ -140,7 +145,7 @@ function ciUnavailable(why) {
  * empty list, because an unknown result is not a negative one.
  * (`gh api` has no --repo flag: the repository is part of the endpoint path.)
  */
-async function fetchCheckRunsForSha(sha, repo, env) {
+export async function fetchCheckRunsForSha(sha, repo, env) {
   const all = [];
   for (let page = 1; page <= CHECK_RUNS_MAX_PAGES; page++) {
     const res = await ghSpawn(
@@ -163,7 +168,7 @@ async function fetchCheckRunsForSha(sha, repo, env) {
 
 const DEFAULT_REQUIRED_CHECKS = ['Tests (ubuntu-latest)', 'Tests (windows-latest)'];
 
-function requiredChecks(env) {
+export function requiredChecks(env) {
   const raw = env && env.CLAIM_REQUIRED_CHECKS;
   if (typeof raw !== 'string') return DEFAULT_REQUIRED_CHECKS;
   return raw.split(',').map((s) => s.trim()).filter((s) => s !== '');

@@ -11,6 +11,10 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import os from 'node:os';
 
+// One definition of "green" for both tools: the required set, its CLAIM_REQUIRED_CHECKS override
+// and the full (paged) check-runs read all come from claim.js (import is safe: it has a direct-run guard).
+import { allRequiredChecksGreen, requiredChecks, fetchCheckRunsForSha } from './claim.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ==========================================================================
@@ -18,29 +22,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ==========================================================================
 
 /**
- * Parse check-runs response and determine CI status.
+ * Map check-runs onto the CI status used to decide closing.
+ *
+ * Green means EVERY required check is present, completed and successful (the claim.js
+ * definition). A required check that is absent, queued or in progress is `pending`; one that
+ * completed without success is `failed`. Unknown or incomplete data is never green.
  *
  * @param {object[]} runs
+ * @param {string[]} [required] — defaults to the claim.js required set (CLAIM_REQUIRED_CHECKS)
  * @returns {'green'|'failed'|'pending'}
  */
-export function parseCheckRuns(runs) {
+export function parseCheckRuns(runs, required = requiredChecks(process.env)) {
   if (!Array.isArray(runs) || runs.length === 0) return 'pending';
+  if (allRequiredChecksGreen(runs, required)) return 'green';
+  return runs.some((r) => isFailedRequiredRun(r, required)) ? 'failed' : 'pending';
+}
 
-  let hasCompleted = false;
-  let hasFailure = false;
-
-  for (const run of runs) {
-    if (run.status === 'completed' || run.status === 'skipped') {
-      hasCompleted = true;
-      const c = run.conclusion;
-      if (c === 'failure' || c === 'timed_out' || c === 'cancelled') {
-        hasFailure = true;
-      }
-    }
-  }
-
-  if (hasCompleted) return hasFailure ? 'failed' : 'green';
-  return 'pending';
+function isFailedRequiredRun(run, required) {
+  return !!run && required.includes(run.name) && run.status === 'completed' && run.conclusion !== 'success';
 }
 
 /**
@@ -210,40 +209,33 @@ export async function fetchPrView(prNumber, repo, env) {
     env
   );
   if (res.status !== 0 || !res.stdout) return null;
-  try { return JSON.parse(res.stdout); } catch { return null; }
+  try {
+    const data = JSON.parse(res.stdout);
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+  } catch { return null; }
 }
 
 /**
- * Search PRs by issue-key string via `gh pr list`.
+ * Search PRs by issue-key string via `gh pr list`, bound to the repository by `--repo`.
+ * Returns null (a failed source) for a non-zero exit, an empty or unreadable body, or a
+ * structure that is not a list. Only a proper empty list means "no PR".
  */
 export async function searchPrsByKey(key, repo, env) {
   const res = await ghSpawn(
-    ['pr', 'list', '--search', key, '--state', 'all', '--json',
+    ['pr', 'list', '--repo', repo, '--search', key, '--state', 'all', '--json',
      'number,state,title,url,baseRefName,headRepository,mergedAt,mergeCommit', '--limit', '10'],
     env
   );
-  if (res.status !== 0) return null;
-  try { return JSON.parse(res.stdout) || []; } catch { return []; }
+  if (res.status !== 0 || !res.stdout || !res.stdout.trim()) return null;
+  try {
+    const data = JSON.parse(res.stdout);
+    return Array.isArray(data) ? data : null;
+  } catch { return null; }
 }
 
 // ==========================================================================
 // Core pickup logic
 // ==========================================================================
-
-/**
- * Check check-runs on a merge SHA via `gh api`.
- */
-async function fetchCheckRunsForSha(mergeCommit, repo, env) {
-  const res = await ghSpawn(
-    ['api', 'repos/' + repo + '/commits/' + mergeCommit + '/check-runs'],
-    env
-  );
-  if (res.status !== 0 || !res.stdout) return [];
-  try {
-    const data = JSON.parse(res.stdout);
-    return Array.isArray(data) ? data : (data.check_runs || []);
-  } catch { return []; }
-}
 
 /**
  * Evaluate one issue that has the ai-awaiting-merge label.
@@ -260,7 +252,8 @@ export async function evaluateAwaitingMergeIssue(issue, opts) {
   const storedPrNum = findStoredPrNumber(state, issue.key);
   if (storedPrNum !== null) {
     const prData = await fetchPrView(storedPrNum, repo, env);
-    if (!prData) return { matched: false, reason: 'pr_unclear', prInfo: null, counts: { awaitingMerge: 0, ready: 0 }, prUnclear: true, err: null };
+    // A stored association is a mandatory source: its failure is "unavailable", not an unclear PR.
+    if (!prData) return { matched: false, reason: 'unavailable', prInfo: null, counts: { awaitingMerge: 0, ready: 0 }, prUnclear: false, err: 'gh_unavailable' };
     return evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, opts);
   }
 
@@ -337,18 +330,22 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
     };
   }
 
-  const runs = await fetchCheckRunsForSha(prData.mergeCommit, repo, opts.env);
-  const ciStatus = parseCheckRuns(runs);
+  // check-runs of the merge commit is a mandatory source: a failed or unreadable answer is
+  // "unavailable" and must never turn into an empty list (that would read as "pending").
+  let runs;
+  try {
+    runs = await fetchCheckRunsForSha(prData.mergeCommit, repo, opts.env);
+  } catch {
+    return { matched: false, reason: 'unavailable', prInfo: null, counts: { awaitingMerge: 0, ready: 0 }, prUnclear: false, err: 'gh_unavailable' };
+  }
+  const required = requiredChecks(opts.env);
+  const ciStatus = parseCheckRuns(runs, required);
 
-  // Collect the first completed check-run id for stored-failure tracking.
+  // Collect the id of the failed required check-run for stored-failure tracking.
   let ciRunId = null;
   if (ciStatus === 'failed') {
-    for (const run of runs) {
-      if (run.status === 'completed' && run.id) {
-        ciRunId = String(run.id);
-        break;
-      }
-    }
+    const failed = runs.find((run) => isFailedRequiredRun(run, required) && run.id);
+    if (failed) ciRunId = String(failed.id);
   }
 
   const status = determinePrStatus({
@@ -598,7 +595,15 @@ export async function main({ argv, env } = {}) {
       return;
     }
 
-    // 2. Continuing a started review.
+    // 2. An ambiguous PR belongs to a more prioritized issue than a review or new work, so it
+    // stops the selection like an unavailable source does: it is a diagnostic outcome, not
+    // "no PR", and it must not be silently replaced by `review` or `ready`.
+    if (unclear) {
+      printResult(unclear);
+      return;
+    }
+
+    // 3. Continuing a started review.
     if (inReviewIssues.length > 0) {
       printResult({
         work: true, reason: 'review',
