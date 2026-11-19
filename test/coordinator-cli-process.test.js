@@ -453,3 +453,15 @@ test('R3.4: precheck process exits; a SECOND process reads claim.issueKey/state/
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stdout.trim(), 'KAN-14,review_pending,review');
 });
+
+// R3.5 on the route: code 0 is read together with `mode`; a pair that gives no permission is not a pass.
+for (const [state, mode] of [['claimed', 'review'], ['review_pending', 'implement'], ['closing', 'implement'], ['work_exists', null]]) {
+  test(`R3.5: claim 0 with ${state}/${mode} is not a permit → precheck 5`, (t) => {
+    const stateDir = mkTmp('cli-pc-state-');
+    const scratch = mkTmp('cli-pc-scratch-');
+    t.after(() => { rmTmp(stateDir); rmTmp(scratch); });
+    const env = precheckEnv(scratch, { claimCode: 0, claimOut: { success: true, state, reason: state, mode, pr: null } });
+    const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+    assert.equal(r.status, 5, r.stdout + r.stderr);
+  });
+}
