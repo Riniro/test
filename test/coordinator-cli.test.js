@@ -42,6 +42,41 @@ function spawnCliScript(stateDir, scriptBody) {
   return scriptPath;
 }
 
+
+// A fresh candidate in the journal plus a stub claim gate that always captures: the minimum the
+// start route needs before the executor may run. `start` also needs --project/--repo/--issue/--mode.
+function routeSetup(stateDir, { candidate } = {}) {
+  const repoKey = resolveRepoKey({ cwd: process.cwd() });
+  writeJournal({
+    stateDir, repoKey,
+    patch: { candidate: candidate || { issueKey: 'KAN-14', mode: 'implement', pr: null, createdAt: new Date().toISOString() } },
+  });
+  const stub = path.join(stateDir, '_claim_stub.mjs');
+  fs.writeFileSync(stub, "process.stdout.write(JSON.stringify({ success: true, state: 'claimed', reason: 'claimed', mode: 'implement', pr: null }) + '\\n');");
+  return {
+    env: { COORDINATOR_STATE_DIR: stateDir, PRECHECK_CLAIM_SCRIPT: stub },
+    flags: ['--project', 'KAN', '--repo', 'o/r', '--issue', 'KAN-14', '--mode', 'implement'],
+  };
+}
+
+// An owner record of THIS host whose process has already exited: the only "proven dead" owner.
+function plantOwner(stateDir, repoKey, owner) {
+  const lockPath = path.join(stateDir, repoKey, 'lock');
+  fs.mkdirSync(lockPath, { recursive: true });
+  if (owner !== null) fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify(owner));
+  return lockPath;
+}
+
+function deadPid() {
+  const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  return Number(r.stdout);
+}
+
+function ownerRecord(over = {}) {
+  const now = new Date().toISOString();
+  return { token: 'secret-token-value', pid: process.pid, host: os.hostname(), repoKey: 'k', acquiredAt: now, heartbeatAt: now, worktree: null, ...over };
+}
+
 // ------------------------------------------------------------------
 // 21. status — нет блокировки: locked: false, journal: MISSING
 // ------------------------------------------------------------------
@@ -167,13 +202,12 @@ test('force-release without --confirm returns exit 12', async (t) => {
 // ------------------------------------------------------------------
 // 28. force-release с --confirm и --reason: lock снимается
 // ------------------------------------------------------------------
-test('force-release with --confirm and --reason releases lock', async (t) => {
+test('force-release with --confirm and --reason releases lock of a proven dead owner', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
-  const acq = acquire({ stateDir, repoKey, meta: {} });
-  assert.equal(acq.ok, true);
+  plantOwner(stateDir, repoKey, ownerRecord({ pid: deadPid() }));
 
   const exitCode = await main({
     argv: ['force-release', '--confirm', '--reason', 'cleanup'],
@@ -222,6 +256,7 @@ test('start without child command returns exit 2', async (t) => {
 test('start acquires lock and writes journal (non-blocking with nohup)', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   const lockPath = path.join(stateDir, repoKey, 'lock');
@@ -229,7 +264,7 @@ test('start acquires lock and writes journal (non-blocking with nohup)', async (
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const rc = await main({ argv: ['start', '--', 'node', '-e', 'process.exit(0)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const rc = await main({ argv: ['start', ...${JSON.stringify(rt.flags)}, '--', 'node', '-e', 'process.exit(0)'], cwd: ${JSON.stringify(process.cwd())}, env: ${JSON.stringify(rt.env)} });`,
     `console.log('EXIT_CODE:' + rc);`,
     `process.exit(rc);`,
   ].join('\n'));
@@ -260,15 +295,16 @@ test('start acquires lock and writes journal (non-blocking with nohup)', async (
 test('start when lock already held returns BUSY exit 9', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   // Seed a lock (acquire in this test process — it will be held)
   acquire({ stateDir, repoKey, meta: {} });
 
   const exitCode = await main({
-    argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
+    argv: ['start', ...rt.flags, '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
-    env: { COORDINATOR_STATE_DIR: stateDir },
+    env: rt.env,
   });
   assert.equal(exitCode, 9);
 });
@@ -364,14 +400,15 @@ test('status with checksum mismatch returns exit 10', async (t) => {
 test('start when lock held returns BUSY exit 9', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   acquire({ stateDir, repoKey, meta: {} });
 
   const exitCode = await main({
-    argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
+    argv: ['start', ...rt.flags, '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
-    env: { COORDINATOR_STATE_DIR: stateDir },
+    env: rt.env,
   });
   assert.equal(exitCode, 9);
 });
@@ -466,6 +503,7 @@ test('main with unknown command returns exit 2', async (t) => {
 test('start propagates child exit code', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   const lockPath = path.join(stateDir, repoKey, 'lock');
@@ -473,7 +511,7 @@ test('start propagates child exit code', async (t) => {
 
   const scriptPath = spawnCliScript(stateDir, [
     `process.env.COORDINATOR_STATE_DIR = ${JSON.stringify(stateDir)};`,
-    `const rc = await main({ argv: ['start', '--', 'node', '-e', 'process.exit(42)'], cwd: ${JSON.stringify(process.cwd())}, env: { COORDINATOR_STATE_DIR: ${JSON.stringify(stateDir)} } });`,
+    `const rc = await main({ argv: ['start', ...${JSON.stringify(rt.flags)}, '--', 'node', '-e', 'process.exit(42)'], cwd: ${JSON.stringify(process.cwd())}, env: ${JSON.stringify(rt.env)} });`,
     `process.exit(rc);`,
   ].join('\n'));
 
@@ -550,6 +588,7 @@ test('recover output does not contain token', async (t) => {
 test('start after release can re-acquire lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   const lockPath = path.join(stateDir, repoKey, 'lock');
@@ -567,9 +606,9 @@ test('start after release can re-acquire lock', async (t) => {
   assert.equal(exitCode, 0);
 
   exitCode = await main({
-    argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
+    argv: ['start', ...rt.flags, '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
-    env: { COORDINATOR_STATE_DIR: stateDir },
+    env: rt.env,
   });
   assert.equal(exitCode, 0);
 
@@ -605,23 +644,24 @@ test('force-release with empty reason returns exit 12', async (t) => {
 test('sequential starts both succeed because each releases the lock', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
+  const rt = routeSetup(stateDir);
 
   const repoKey = resolveRepoKey({ cwd: process.cwd() });
   const lockPath = path.join(stateDir, repoKey, 'lock');
   try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch { /* */ }
 
   const r1 = await main({
-    argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
+    argv: ['start', ...rt.flags, '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
-    env: { COORDINATOR_STATE_DIR: stateDir },
+    env: rt.env,
   });
   assert.equal(r1, 0);
   assert.ok(!status({ stateDir, repoKey }).held, 'первый start должен освободить блокировку');
 
   const r2 = await main({
-    argv: ['start', '--', 'node', '-e', 'process.exit(0)'],
+    argv: ['start', ...rt.flags, '--', 'node', '-e', 'process.exit(0)'],
     cwd: process.cwd(),
-    env: { COORDINATOR_STATE_DIR: stateDir },
+    env: rt.env,
   });
   // Запуски последовательные, а не одновременные: второй берёт свободную блокировку.
   // Случай BUSY при живом дочернем процессе проверяется в coordinator-cli-process.test.js.
@@ -657,72 +697,54 @@ test('status with valid journal shows stage and updatedAt', async (t) => {
 });
 
 // ------------------------------------------------------------------
-// R3.2 — precheck through main(), pickup/claim are stub processes
+// R5.6 (second half) — 4m59s old is still inside the term, but the live checks STILL run.
+// In-process on purpose: the gap between seeding and the age check must be milliseconds,
+// not a process start, or the boundary case would depend on machine load.
 // ------------------------------------------------------------------
-function writePrecheckStubs(dir, { pkCode, pkOut, clCode, clOut }) {
-  const pk = path.join(dir, 'pk-stub.mjs');
-  const cl = path.join(dir, 'cl-stub.mjs');
-  const clLog = path.join(dir, 'claim-called');
-  fs.writeFileSync(pk, `process.stdout.write(${JSON.stringify(pkOut)} + '\\n'); process.exit(${pkCode});`);
-  fs.writeFileSync(cl, [
-    "import fs from 'node:fs';",
-    `fs.writeFileSync(${JSON.stringify(clLog)}, 'called');`,
-    `process.stdout.write(${JSON.stringify(JSON.stringify(clOut))} + '\\n'); process.exit(${clCode});`,
-  ].join('\n'));
-  return { env: { PRECHECK_PICKUP_SCRIPT: pk, PRECHECK_CLAIM_SCRIPT: cl }, clLog };
-}
-
-test('precheck: claim 0 review_pending/review → exit 0 and the journal carries the claim', async (t) => {
+test('R5.6: a candidate 4m59s old is not expired, and the live check (the gate) is still called', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
-  const { env } = writePrecheckStubs(stateDir, {
-    pkCode: 0, pkOut: JSON.stringify({ work: true, issue: { key: 'KAN-14' } }),
-    clCode: 0, clOut: { success: true, state: 'review_pending', mode: 'review', pr: { number: 7, url: 'u', headSha: 'sha1' } },
+  const repoKey = resolveRepoKey({ cwd: process.cwd() });
+  const log = path.join(stateDir, 'claim-calls');
+  const stub = path.join(stateDir, '_claim_counting_stub.mjs');
+  fs.writeFileSync(stub, [
+    "import fs from 'node:fs';",
+    `fs.appendFileSync(${JSON.stringify(log)}, 'call\\n');`,
+    "process.stdout.write(JSON.stringify({ success: true, state: 'claimed', reason: 'claimed', mode: 'implement', pr: null }) + '\\n');",
+  ].join('\n'));
+  const marker = path.join(stateDir, 'ran');
+  writeJournal({
+    stateDir, repoKey,
+    patch: { candidate: { issueKey: 'KAN-14', mode: 'implement', pr: null, createdAt: new Date(Date.now() - (4 * 60 + 59) * 1000).toISOString() } },
   });
+
   const rc = await main({
-    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
+    argv: ['start', '--project', 'KAN', '--repo', 'o/r', '--issue', 'KAN-14', '--mode', 'implement', '--',
+      process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`],
     cwd: process.cwd(),
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
+    env: { COORDINATOR_STATE_DIR: stateDir, PRECHECK_CLAIM_SCRIPT: stub },
   });
   assert.equal(rc, 0);
-  const jr = readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) });
-  assert.equal(jr.ok, true);
-  assert.deepStrictEqual(jr.record.claim, {
-    issueKey: 'KAN-14', state: 'review_pending', mode: 'review', pr: { number: 7, url: 'u', headSha: 'sha1' },
-  });
+  assert.equal(fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length, 1, 'a not-yet-expired record does not replace the re-check');
+  assert.ok(fs.existsSync(marker));
 });
 
-test('precheck: pickup 3 → exit 3, claim stub not called, journal not created', async (t) => {
+test('R5.6: a candidate 5m01s old is expired (16): the same setup, the gate is not called', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
-  const { env, clLog } = writePrecheckStubs(stateDir, {
-    pkCode: 3, pkOut: JSON.stringify({ work: false, reason: 'none', issue: null }),
-    clCode: 0, clOut: { state: 'claimed', mode: 'implement' },
+  const repoKey = resolveRepoKey({ cwd: process.cwd() });
+  const log = path.join(stateDir, 'claim-calls');
+  const stub = path.join(stateDir, '_claim_counting_stub.mjs');
+  fs.writeFileSync(stub, `import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(log)}, 'call\\n');`);
+  writeJournal({
+    stateDir, repoKey,
+    patch: { candidate: { issueKey: 'KAN-14', mode: 'implement', pr: null, createdAt: new Date(Date.now() - (5 * 60 + 1) * 1000).toISOString() } },
   });
   const rc = await main({
-    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
+    argv: ['start', '--project', 'KAN', '--repo', 'o/r', '--issue', 'KAN-14', '--mode', 'implement', '--', process.execPath, '-e', ''],
     cwd: process.cwd(),
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
+    env: { COORDINATOR_STATE_DIR: stateDir, PRECHECK_CLAIM_SCRIPT: stub },
   });
-  assert.equal(rc, 3);
-  assert.ok(!fs.existsSync(clLog));
-  assert.equal(readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) }).reason, 'MISSING');
-});
-
-test('precheck: claim 6 source_unavailable → exit 6 and the actual state is in the journal', async (t) => {
-  const stateDir = tmpDir();
-  t.after(() => cleanup(stateDir));
-  const { env } = writePrecheckStubs(stateDir, {
-    pkCode: 0, pkOut: JSON.stringify({ work: true, issue: { key: 'KAN-14' } }),
-    clCode: 6, clOut: { success: false, reason: 'source_unavailable', state: 'source_unavailable' },
-  });
-  const rc = await main({
-    argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'],
-    cwd: process.cwd(),
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...env },
-  });
-  assert.equal(rc, 6);
-  const jr = readJournal({ stateDir, repoKey: resolveRepoKey({ cwd: process.cwd() }) });
-  assert.equal(jr.record.claim.state, 'source_unavailable');
-  assert.equal(jr.record.claim.mode, null);
+  assert.equal(rc, 16);
+  assert.ok(!fs.existsSync(log));
 });

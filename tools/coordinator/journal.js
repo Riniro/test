@@ -17,6 +17,7 @@ const KNOWN_KEYS = new Set([
   'prUrl',
   'lastConfirmedAction',
   'claim',
+  'candidate',
   'updatedAt',
   'checksum',
 ]);
@@ -52,6 +53,9 @@ const DEFAULTS = {
   // Result of the claim gate: null or { issueKey, state, mode, pr: { number, url, headSha } | null }.
   // Deliberately NOT in REQUIRED_KEYS: journals of the previous format have no such field.
   claim: null,
+  // Candidate written by precheck: null or { issueKey, mode, pr: { number, url, headSha } | null, createdAt }.
+  // Also NOT in REQUIRED_KEYS. `createdAt` is set once and is the only source of the record's age.
+  candidate: null,
 };
 
 function journalPath({ stateDir, repoKey }) {
@@ -236,6 +240,9 @@ function read({ stateDir, repoKey }) {
   // A record of the previous format carries no `claim`: that is not damage, it reads as null.
   if (!('claim' in record)) {
     record = { ...record, claim: null };
+  }
+  if (!('candidate' in record)) {
+    record = { ...record, candidate: null };
   }
 
   return { ok: true, record };

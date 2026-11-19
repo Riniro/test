@@ -438,6 +438,79 @@ test('R3.1.4: a patch with an unknown key is still dropped (claim is the only ad
   assert.deepStrictEqual(r.record.claim, CLAIM);
 });
 
+// ------------------------------------------------------------------
+// R4 — candidate: a known key, not required, covered by the checksum
+// ------------------------------------------------------------------
+const CANDIDATE = {
+  issueKey: 'KAN-16', mode: 'review',
+  pr: { number: 15, url: 'https://gh.test/o/r/pull/15', headSha: 'f5148f5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+  createdAt: '2026-11-20T01:00:00.000Z',
+};
+
+test('R4: candidate is stored, read back unchanged, and defaults to null', () => {
+  const repoKey = 'cand-basic';
+  write({ stateDir, repoKey, patch: { stage: 'x' } });
+  assert.equal(read({ stateDir, repoKey }).record.candidate, null);
+  write({ stateDir, repoKey, patch: { candidate: CANDIDATE } });
+  assert.deepStrictEqual(read({ stateDir, repoKey }).record.candidate, CANDIDATE);
+});
+
+test('R4: a field changed INSIDE candidate breaks the checksum', () => {
+  const repoKey = 'cand-checksum';
+  write({ stateDir, repoKey, patch: { candidate: CANDIDATE } });
+  const fp = journalPath({ stateDir, repoKey });
+  const orig = fs.readFileSync(fp, 'utf8');
+  for (const mutate of [
+    (c) => { c.createdAt = '2030-01-01T00:00:00.000Z'; },
+    (c) => { c.pr.headSha = 'deadbeef'; },
+    (c) => { c.mode = 'implement'; },
+    (c) => { c.pr = null; },
+  ]) {
+    const rec = JSON.parse(orig);
+    mutate(rec.candidate);
+    fs.writeFileSync(fp, JSON.stringify(rec));
+    const r = read({ stateDir, repoKey });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'CHECKSUM_MISMATCH');
+  }
+  fs.writeFileSync(fp, orig);
+  assert.equal(read({ stateDir, repoKey }).ok, true);
+});
+
+test('R4: a later write (updatedAt moves) does not rewrite candidate.createdAt', () => {
+  const repoKey = 'cand-immutable';
+  write({ stateDir, repoKey, patch: { candidate: CANDIDATE } });
+  write({ stateDir, repoKey, patch: { stage: 'running' } });
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.record.candidate.createdAt, CANDIDATE.createdAt);
+  assert.notEqual(r.record.updatedAt, CANDIDATE.createdAt);
+});
+
+test('R5.13: a journal of the previous format (no candidate, no claim) reads, passes integrity and is appended', () => {
+  const repoKey = 'old-format';
+  const old = {
+    version: 1, issueKey: 'KAN-6', stage: 'planning', runId: null, taskId: null, dispatchIds: [],
+    branch: null, commitSha: null, prUrl: null, lastConfirmedAction: null,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  old.checksum = checksumOf(old);
+  fs.mkdirSync(path.dirname(journalPath({ stateDir, repoKey })), { recursive: true });
+  fs.writeFileSync(journalPath({ stateDir, repoKey }), JSON.stringify(old));
+
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.record.candidate, null);
+  assert.equal(r.record.claim, null);
+  assert.equal(r.record.stage, 'planning');
+
+  const w = write({ stateDir, repoKey, patch: { candidate: CANDIDATE } });
+  assert.equal(w.ok, true);
+  const r2 = read({ stateDir, repoKey });
+  assert.equal(r2.ok, true);
+  assert.deepStrictEqual(r2.record.candidate, CANDIDATE);
+  assert.equal(r2.record.stage, 'planning', 'the old fields survive the append');
+});
+
 after(() => {
   try {
     if (fs.existsSync(stateDir)) {
