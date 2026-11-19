@@ -44,6 +44,16 @@ function startServer(handler) {
   });
 }
 
+// No fixture in this file models an ai-in-review issue, and a real Jira returns
+// none for a label nobody carries. Answer that query explicitly so the catch-all
+// branch of a stub cannot hand back the awaiting-merge issue instead.
+function noInReviewFixture(req, res) {
+  if (!(req.url || '').includes('ai-in-review')) return false;
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ issues: [] }));
+  return true;
+}
+
 function writeCredsFile(dir, site) {
   const p = path.join(dir, 'jira-creds.json');
   fs.writeFileSync(p, JSON.stringify({ site, email: 'test@example.com', token: 'tok-123' }), 'utf8');
@@ -66,18 +76,21 @@ function runSpawn(scriptPath, args, env, timeoutMs = 10000) {
 // ==========================================================================
 
 describe('parseCheckRuns', () => {
+  // Green is the claim.js definition: EVERY required check present, completed and successful.
+  const U = (o = {}) => ({ name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', ...o });
+  const W = (o = {}) => ({ name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success', ...o });
   test('empty → pending', () => assert.strictEqual(parseCheckRuns([]), 'pending'));
-  test('queued → pending', () => assert.strictEqual(parseCheckRuns([{ status: 'queued' }]), 'pending'));
-  test('in_progress → pending', () => assert.strictEqual(parseCheckRuns([{ status: 'in_progress' }]), 'pending'));
-  test('completed success → green', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'success' }]), 'green'));
-  test('completed failure → failed', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'failure' }]), 'failed'));
-  test('timed_out → failed', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'timed_out' }]), 'failed'));
-  test('cancelled → failed', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'cancelled' }]), 'failed'));
-  test('skipped does not count as failure', () => assert.strictEqual(parseCheckRuns([{ status: 'skipped' }]), 'green'));
-  test('mixed completed + queued → green', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'success' }, { status: 'queued' }]), 'green'));
-  test('completed success + completed failure → failed', () => assert.strictEqual(parseCheckRuns([{ status: 'completed', conclusion: 'success' }, { status: 'completed', conclusion: 'failure' }]), 'failed'));
+  test('queued required check → pending', () => assert.strictEqual(parseCheckRuns([U(), W({ status: 'queued', conclusion: null })]), 'pending'));
+  test('in_progress required check → pending', () => assert.strictEqual(parseCheckRuns([U(), W({ status: 'in_progress', conclusion: null })]), 'pending'));
+  test('all required completed success → green', () => assert.strictEqual(parseCheckRuns([U(), W()]), 'green'));
+  test('one successful required check of two → pending, not green', () => assert.strictEqual(parseCheckRuns([U()]), 'pending'));
+  test('required completed failure → failed', () => assert.strictEqual(parseCheckRuns([U(), W({ conclusion: 'failure' })]), 'failed'));
+  test('timed_out → failed', () => assert.strictEqual(parseCheckRuns([U(), W({ conclusion: 'timed_out' })]), 'failed'));
+  test('cancelled → failed', () => assert.strictEqual(parseCheckRuns([U(), W({ conclusion: 'cancelled' })]), 'failed'));
+  test('a skipped required check is not green', () => assert.strictEqual(parseCheckRuns([U(), W({ conclusion: 'skipped' })]), 'failed'));
+  test('one success and one queued → pending ("some success and no failure" is not green)', () => assert.strictEqual(parseCheckRuns([U(), W({ status: 'queued', conclusion: null })]), 'pending'));
+  test('success + failure → failed', () => assert.strictEqual(parseCheckRuns([U(), W({ conclusion: 'failure' })]), 'failed'));
 });
-
 // ==========================================================================
 // keyInTitle
 // ==========================================================================
@@ -260,6 +273,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         // No ready issues — only awaiting-merge
@@ -303,6 +317,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -341,7 +356,7 @@ describe('CLI process tests', () => {
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
-      '  process.stdout.write(JSON.stringify([{"status":"completed","conclusion":"success"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
@@ -349,6 +364,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
@@ -410,6 +426,7 @@ describe('CLI process tests', () => {
     const sd3 = mkTempDir('pick-s3');
 
     const { server: srv3, close: cs3 } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -460,6 +477,7 @@ describe('CLI process tests', () => {
     const jiraDir = mkTempDir('pick-j2a');
     const sd = mkTempDir('pick-s2a');
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -490,6 +508,7 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, 'process.exit(0);');
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ issues: [] }));
     });
@@ -539,6 +558,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -588,7 +608,7 @@ describe('CLI process tests', () => {
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
-      '  process.stdout.write(JSON.stringify([{"status":"completed","conclusion":"failure"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
@@ -596,6 +616,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
@@ -647,6 +668,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -704,6 +726,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -761,6 +784,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const { server: srv, close: cs } = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       const url = req.url || '';
       if (url.includes('ai-ready')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -814,7 +838,7 @@ describe('CLI process tests', () => {
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
-      '  process.stdout.write(JSON.stringify([{"id":"ci-1","status":"completed","conclusion":"failure"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
@@ -841,6 +865,7 @@ describe('CLI process tests', () => {
     try {
       // Phase 2: run pickup with GH stub + Jira mock
       const { server: srv, close: cs } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -905,7 +930,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify([{"id":"ci-1","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',
@@ -913,6 +938,7 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv1, close: cs1 } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -950,7 +976,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify([{"id":"ci-2","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-2","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',
@@ -958,6 +984,7 @@ describe('CLI process tests', () => {
       ].join('\n'));
 
       const { server: srv2, close: cs2 } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1023,7 +1050,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify([{"id":"ci-1","status":"completed","conclusion":"failure"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',
@@ -1032,6 +1059,7 @@ describe('CLI process tests', () => {
 
       // Jira stub: ai-ready returns KAN-99, ai-awaiting-merge returns KAN-14
       const { server: srv, close: cs } = await startServer((req, res) => {
+        if (noInReviewFixture(req, res)) return;
         const url = req.url || '';
         if (url.includes('ai-ready')) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1088,7 +1116,7 @@ describe('CLI process tests', () => {
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
-      '  process.stdout.write(JSON.stringify([{"status":"completed","conclusion":"success"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
@@ -1096,6 +1124,7 @@ describe('CLI process tests', () => {
     ].join('\n'));
 
     const srvObj = await startServer((req, res) => {
+      if (noInReviewFixture(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         issues: [
@@ -1128,5 +1157,549 @@ describe('CLI process tests', () => {
       cleanup(sd);
       cleanup(ghStubDir);
     }
+  });
+  // ------------------------------------------------------------------------
+  // ai-in-review branch (reason: 'review') — contract: continuing started work
+  // takes priority over picking up new work. gh is never needed on this branch.
+  // ------------------------------------------------------------------------
+  function noGhStub() {
+    const d = mkTempDir('pick-gh-none');
+    const stubPath = path.join(d, 'gh.js');
+    fs.writeFileSync(stubPath, 'process.stdout.write("[]\\n");process.exit(0);');
+    return { dir: d, stubPath };
+  }
+
+  test('ai-in-review issue → code 0, reason review, issue returned', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (url.includes('ai-in-review')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-in-review'] } }] }));
+        } else {
+          res.end(JSON.stringify({ issues: [] }));
+        }
+      });
+      assert.strictEqual(result.status, 0);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.work, true);
+      assert.strictEqual(out.reason, 'review');
+      assert.strictEqual(out.issue.key, 'KAN-14');
+      assert.ok(out.issue.labels.includes('ai-in-review'));
+      assert.strictEqual(out.pr, null);
+      assert.strictEqual(out.counts.inReview, 1);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
+
+  test('ai-in-review wins over ai-ready and ai-awaiting-merge', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (url.includes('ai-in-review')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-14', fields: { summary: 'In review', labels: ['project-test', 'ai-in-review'] } }] }));
+        } else if (url.includes('ai-ready')) {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-20', fields: { summary: 'New', labels: ['project-test', 'ai-ready'] } }] }));
+        } else {
+          res.end(JSON.stringify({ issues: [{ key: 'KAN-9', fields: { summary: 'Waiting', labels: ['project-test', 'ai-awaiting-merge'] } }] }));
+        }
+      });
+      assert.strictEqual(result.status, 0);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.reason, 'review');
+      assert.strictEqual(out.issue.key, 'KAN-14', 'started work is continued, new work is not picked up');
+      assert.strictEqual(out.counts.ready, 1);
+      assert.strictEqual(out.counts.awaitingMerge, 1);
+      assert.strictEqual(out.counts.inReview, 1);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
+
+  test('ai-in-review query unauthorized → code 4, unavailable (not an empty queue)', async () => {
+    const gh = noGhStub();
+    try {
+      const result = await runPickupCli(gh.stubPath, (req, res) => {
+        const url = req.url || '';
+        if (url.includes('ai-in-review')) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ issues: [] }));
+      });
+      assert.strictEqual(result.status, 4);
+      const out = JSON.parse(result.stdout);
+      assert.strictEqual(out.reason, 'unavailable');
+      assert.strictEqual(out.counts.inReview, null);
+    } finally {
+      cleanup(gh.dir);
+    }
+  });
+});
+
+// ==========================================================================
+// Fix round 2 — «Матрица очереди (pickup.js)»: priority is the action available
+// NOW (close → continue review → new work), and an issue with nothing to do
+// is skipped without stopping the queue.
+// ==========================================================================
+
+describe('queue priority matrix', () => {
+  const MERGED = (key, n) => ({
+    number: n, state: 'MERGED', title: '[' + key + '] work', url: 'https://gh.test/Riniro/test/pull/' + n,
+    baseRefName: 'master', headRepository: { full_name: 'Riniro/test' },
+    mergedAt: '2024-01-01T00:00:00Z', mergeCommit: 'm' + n,
+  });
+  const OPEN = (key, n) => ({ ...MERGED(key, n), state: 'OPEN', mergedAt: null, mergeCommit: null });
+  const issue = (key, ...labels) => ({ key, fields: { summary: key + ' summary', labels: ['project-test', ...labels] } });
+
+  /**
+   * @param {{ awaiting?: object[], inReview?: object[], ready?: object[], prs?: Record<string, object[]> }} cfg
+   */
+  async function run(cfg) {
+    const dir = mkTempDir('pick-q');
+    const stub = path.join(dir, 'gh.js');
+    const cfgPath = path.join(dir, 'cfg.json');
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg.prs || {}));
+    fs.writeFileSync(stub, [
+      'const fs = require("fs");',
+      'const a = process.argv.slice(2);',
+      'const prs = JSON.parse(fs.readFileSync(process.env.PQ_CFG, "utf8"));',
+      'if (a[0] === "pr" && a[1] === "list") {',
+      '  const key = a[a.indexOf("--search") + 1];',
+      '  process.stdout.write(JSON.stringify(prs[key] || []));',
+      '} else if (a[0] === "api") {',
+      '  process.stdout.write(JSON.stringify({ check_runs: [{ name: "Tests (ubuntu-latest)", status: "completed", conclusion: "success" }, { name: "Tests (windows-latest)", status: "completed", conclusion: "success" }] }));',
+      '} else {',
+      '  process.stdout.write("[]");',
+      '}',
+      'process.exit(0);',
+    ].join('\n'));
+    const jiraDir = mkTempDir('pick-qj');
+    const sd = mkTempDir('pick-qs');
+    const { server: srv, close } = await startServer((req, res) => {
+      const url = req.url || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      let issues = [];
+      if (url.includes('ai-in-review')) issues = cfg.inReview || [];
+      else if (url.includes('ai-awaiting-merge')) issues = cfg.awaiting || [];
+      else if (url.includes('ai-ready')) issues = cfg.ready || [];
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      PQ_CFG: cfgPath,
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  }
+
+  test('merged PR and an ai-in-review issue → the closing one is issued first', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      prs: { 'KAN-1': [MERGED('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.work, true);
+    assert.strictEqual(out.reason, 'closing');
+    assert.strictEqual(out.issue.key, 'KAN-1');
+  });
+
+  test('merged PR and an ai-ready issue → the closing one is issued first', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      ready: [issue('KAN-3', 'ai-ready')],
+      prs: { 'KAN-1': [MERGED('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.reason, 'closing');
+    assert.strictEqual(out.issue.key, 'KAN-1');
+  });
+
+  test('ai-in-review issue and an ai-ready issue → continuing the review is issued first', async () => {
+    const { status, out } = await run({
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      ready: [issue('KAN-3', 'ai-ready')],
+    });
+    assert.strictEqual(status, 0);
+    assert.strictEqual(out.reason, 'review');
+    assert.strictEqual(out.issue.key, 'KAN-2');
+  });
+
+  test('sole issue is an open PR with confirmed readiness → skipped, the queue is not stopped (code 3, not 4)', async () => {
+    const { status, out } = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(status, 3);
+    assert.strictEqual(out.work, false);
+    assert.strictEqual(out.reason, 'awaiting_merge');
+    assert.strictEqual(out.issue, null);
+  });
+
+  test('issue with nothing to do first, available work after it → the available work is issued', async () => {
+    // KAN-1 is an open PR waiting for a human: nothing to do. KAN-4 follows it with a merged PR.
+    const closing = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge'), issue('KAN-4', 'ai-awaiting-merge')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)], 'KAN-4': [MERGED('KAN-4', 14)] },
+    });
+    assert.strictEqual(closing.status, 0);
+    assert.strictEqual(closing.out.reason, 'closing');
+    assert.strictEqual(closing.out.issue.key, 'KAN-4');
+
+    // The same waiting issue does not hide a review in progress…
+    const review = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      inReview: [issue('KAN-2', 'ai-in-review')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(review.status, 0);
+    assert.strictEqual(review.out.reason, 'review');
+    assert.strictEqual(review.out.issue.key, 'KAN-2');
+
+    // …nor new work.
+    const ready = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      ready: [issue('KAN-3', 'ai-ready')],
+      prs: { 'KAN-1': [OPEN('KAN-1', 11)] },
+    });
+    assert.strictEqual(ready.status, 0);
+    assert.strictEqual(ready.out.reason, 'ready');
+    assert.strictEqual(ready.out.issue.key, 'KAN-3');
+  });
+});
+
+describe('queue priority — gh unavailable', () => {
+  test('awaiting-merge issue cannot be evaluated (gh down) and a review exists → unavailable, not a lower-priority issue', async () => {
+    const dir = mkTempDir('pick-qg');
+    const stub = path.join(dir, 'gh.js');
+    fs.writeFileSync(stub, 'process.exit(1);');
+    const jiraDir = mkTempDir('pick-qgj');
+    const sd = mkTempDir('pick-qgs');
+    const { server: srv, close } = await startServer((req, res) => {
+      const url = req.url || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const mk = (k, l) => ({ key: k, fields: { summary: k, labels: ['project-test', l] } });
+      let issues = [];
+      if (url.includes('ai-in-review')) issues = [mk('KAN-2', 'ai-in-review')];
+      else if (url.includes('ai-awaiting-merge')) issues = [mk('KAN-1', 'ai-awaiting-merge')];
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      assert.strictEqual(r.status, 4);
+      assert.strictEqual(JSON.parse(r.stdout).reason, 'unavailable');
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  });
+});
+
+// ==========================================================================
+// Round 3 — mandatory sources, ambiguous PR, required checks, --repo binding
+// ==========================================================================
+
+describe('pickup round 3', () => {
+  const UBUNTU = { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' };
+  const WINDOWS = { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' };
+  const GREEN = [UBUNTU, WINDOWS];
+  const MERGED = (key, n) => ({
+    number: n, state: 'MERGED', title: '[' + key + '] work', url: 'https://gh.test/Riniro/test/pull/' + n,
+    baseRefName: 'master', headRepository: { full_name: 'Riniro/test' },
+    mergedAt: new Date(Date.now() - 5 * 60000).toISOString(), mergeCommit: 'm' + n,
+  });
+  const OPEN = (key, n) => ({ ...MERGED(key, n), state: 'OPEN', mergedAt: null, mergeCommit: null });
+  const issue = (key, ...labels) => ({ key, fields: { summary: key + ' summary', labels: ['project-test', ...labels] } });
+
+  // Configurable gh stub. cfg: list ({KEY: array|raw string}), listFail, view ({n: object|raw}), viewFail,
+  // api ({ runs, raw, fail }), prLinks (stored issue→PR association). Every call is logged.
+  const STUB = [
+    'const fs = require("fs");',
+    'const a = process.argv.slice(2);',
+    'fs.appendFileSync(process.env.PQ_LOG, JSON.stringify(a) + "\\n");',
+    'const cfg = JSON.parse(fs.readFileSync(process.env.PQ_CFG, "utf8"));',
+    'const out = (x) => { process.stdout.write(typeof x === "string" ? x : JSON.stringify(x)); process.exit(0); };',
+    'if (a[0] === "pr" && a[1] === "list") {',
+    '  if (cfg.listFail) process.exit(1);',
+    '  const v = (cfg.list || {})[a[a.indexOf("--search") + 1]];',
+    '  out(v === undefined ? [] : v);',
+    '}',
+    'if (a[0] === "pr" && a[1] === "view") {',
+    '  if (cfg.viewFail) process.exit(1);',
+    '  const v = (cfg.view || {})[a[2]];',
+    '  if (v === undefined) process.exit(1);',
+    '  out(v);',
+    '}',
+    'if (a[0] === "api") {',
+    '  const api = cfg.api || {};',
+    '  if (api.fail) process.exit(1);',
+    '  if (api.raw !== undefined) out(api.raw);',
+    '  out({ total_count: (api.runs || []).length, check_runs: api.runs || [] });',
+    '}',
+    'process.exit(1);',
+  ].join('\n');
+
+  async function run(cfg, extraEnv = {}) {
+    const dir = mkTempDir('pick-r3');
+    const stub = path.join(dir, 'gh.js');
+    const cfgPath = path.join(dir, 'cfg.json');
+    const logPath = path.join(dir, 'log.jsonl');
+    fs.writeFileSync(stub, STUB);
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+    fs.writeFileSync(logPath, '');
+    const jiraDir = mkTempDir('pick-r3j');
+    const sd = mkTempDir('pick-r3s');
+    if (cfg.prLinks) fs.writeFileSync(path.join(sd, 'pickup-state.json'), JSON.stringify({ version: 1, records: [], prLinks: cfg.prLinks }));
+    const jiraCalls = [];
+    const { server: srv, close } = await startServer((req, res) => {
+      jiraCalls.push(req.method + ' ' + (req.url || '').split('?')[0]);
+      const url = req.url || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      let issues = [];
+      if (url.includes('ai-in-review')) issues = cfg.inReview || [];
+      else if (url.includes('ai-awaiting-merge')) issues = cfg.awaiting || [];
+      else if (url.includes('ai-ready')) issues = cfg.ready || [];
+      res.end(JSON.stringify({ issues }));
+    });
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stub,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+      PQ_CFG: cfgPath,
+      PQ_LOG: logPath,
+    };
+    delete env.CLAIM_REQUIRED_CHECKS;
+    Object.assign(env, extraEnv);
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      let out = null;
+      try { out = JSON.parse(r.stdout); } catch { /* not json */ }
+      const gh = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+      return { status: r.status, out, gh, jiraCalls };
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  }
+
+  const unavailable = (r) => {
+    assert.strictEqual(r.status, 4);
+    assert.strictEqual(r.out.reason, 'unavailable');
+    assert.strictEqual(r.out.work, false);
+  };
+
+  // ---- R1 — check-runs is a mandatory source ----------------------------------------------------
+
+  const withNeighbours = {
+    awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+    inReview: [issue('KAN-2', 'ai-in-review')],
+    ready: [issue('KAN-3', 'ai-ready')],
+    list: { 'KAN-1': [MERGED('KAN-1', 11)] },
+  };
+
+  test('R1: merged PR, gh api exits 1, review and ready alongside → code 4 unavailable', async () => {
+    unavailable(await run({ ...withNeighbours, api: { fail: true } }));
+  });
+
+  test('R1: merged PR, gh api prints <html> with code 0 → code 4 unavailable', async () => {
+    unavailable(await run({ ...withNeighbours, api: { raw: '<html>oops</html>' } }));
+  });
+
+  test('R1: merged PR, gh api prints an empty body with code 0 → code 4 unavailable', async () => {
+    unavailable(await run({ ...withNeighbours, api: { raw: '' } }));
+  });
+
+  test('R1: control — healthy gh api, all required green → closing', async () => {
+    const r = await run({ ...withNeighbours, api: { runs: GREEN } });
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.out.reason, 'closing');
+    assert.strictEqual(r.out.issue.key, 'KAN-1');
+  });
+
+  // ---- R2 — pr view / pr list are mandatory sources ---------------------------------------------
+
+  test('R2: stored association, gh pr view exits 1, review alongside → code 4 unavailable', async () => {
+    unavailable(await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')], inReview: [issue('KAN-2', 'ai-in-review')],
+      prLinks: [{ issueKey: 'KAN-1', prNumber: 11 }], viewFail: true,
+    }));
+  });
+
+  test('R2: stored association, gh pr view unreadable body (code 0) → code 4 unavailable', async () => {
+    unavailable(await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')], ready: [issue('KAN-3', 'ai-ready')],
+      prLinks: [{ issueKey: 'KAN-1', prNumber: 11 }], view: { 11: '<html></html>' },
+    }));
+  });
+
+  test('R2: gh pr list prints <html> with code 0, review alongside → code 4 unavailable', async () => {
+    unavailable(await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')], inReview: [issue('KAN-2', 'ai-in-review')],
+      list: { 'KAN-1': '<html>oops</html>' },
+    }));
+  });
+
+  test('R2: gh pr list prints an empty body or a non-list with code 0 → code 4 unavailable', async () => {
+    for (const raw of ['', '{}', 'null']) {
+      unavailable(await run({
+        awaiting: [issue('KAN-1', 'ai-awaiting-merge')], ready: [issue('KAN-3', 'ai-ready')],
+        list: { 'KAN-1': raw },
+      }));
+    }
+  });
+
+  test('R2: control — a proper empty list means "no PR": the ready issue is issued', async () => {
+    const r = await run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], ready: [issue('KAN-3', 'ai-ready')], list: { 'KAN-1': [] } });
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.out.reason, 'ready');
+  });
+
+  // ---- R3 — an ambiguous PR is its own diagnostic outcome ---------------------------------------
+
+  test('R3: two candidate PRs, review alongside → code 4 pr_unclear, no review', async () => {
+    const r = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')], inReview: [issue('KAN-2', 'ai-in-review')],
+      list: { 'KAN-1': [OPEN('KAN-1', 11), OPEN('KAN-1', 12)] },
+    });
+    assert.strictEqual(r.status, 4);
+    assert.strictEqual(r.out.reason, 'pr_unclear');
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.issue.key, 'KAN-1');
+  });
+
+  test('R3: two candidate PRs, ready alongside → code 4 pr_unclear, no ready', async () => {
+    const r = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')], ready: [issue('KAN-3', 'ai-ready')],
+      list: { 'KAN-1': [OPEN('KAN-1', 11), MERGED('KAN-1', 12)] },
+    });
+    assert.strictEqual(r.status, 4);
+    assert.strictEqual(r.out.reason, 'pr_unclear');
+    assert.strictEqual(r.out.work, false);
+  });
+
+  // ---- R6 — closing needs EVERY required check ---------------------------------------------------
+
+  const closingWith = (runs, extraEnv) => run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], list: { 'KAN-1': [MERGED('KAN-1', 11)] }, api: { runs } }, extraEnv);
+
+  test('R6: a required check is missing → closing is not allowed', async () => {
+    const r = await closingWith([UBUNTU]);
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'closing_ci_pending');
+    assert.strictEqual(r.status, 3);
+  });
+
+  test('R6: a required check is in_progress → closing is not allowed', async () => {
+    const r = await closingWith([UBUNTU, { ...WINDOWS, status: 'in_progress', conclusion: null }]);
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'closing_ci_pending');
+  });
+
+  test('R6: a required check is queued → closing is not allowed', async () => {
+    const r = await closingWith([UBUNTU, { ...WINDOWS, status: 'queued', conclusion: null }]);
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'closing_ci_pending');
+  });
+
+  test('R6: a required check failed → the handled-failure path (closing_ci_failed, work)', async () => {
+    const r = await closingWith([UBUNTU, { ...WINDOWS, id: 77, conclusion: 'failure' }]);
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.out.work, true);
+    assert.strictEqual(r.out.reason, 'closing_ci_failed');
+  });
+
+  test('R6: all required green → closing', async () => {
+    const r = await closingWith(GREEN);
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.out.reason, 'closing');
+  });
+
+  test('R6: one green optional check and no required ones → closing is not allowed', async () => {
+    const r = await closingWith([{ name: 'lint', status: 'completed', conclusion: 'success' }]);
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'closing_ci_pending');
+  });
+
+  test('R6: CLAIM_REQUIRED_CHECKS overrides the required set, same as claim.js', async () => {
+    const lint = { name: 'lint', status: 'completed', conclusion: 'success' };
+    const ok = await closingWith([lint], { CLAIM_REQUIRED_CHECKS: 'lint' });
+    assert.strictEqual(ok.out.reason, 'closing');
+    const missing = await closingWith([UBUNTU], { CLAIM_REQUIRED_CHECKS: 'lint' });
+    assert.strictEqual(missing.out.work, false);
+  });
+
+  test('R6: parseCheckRuns maps required checks → green/pending/failed', () => {
+    const req = ['a', 'b'];
+    const ok = (n) => ({ name: n, status: 'completed', conclusion: 'success' });
+    assert.strictEqual(parseCheckRuns([ok('a'), ok('b')], req), 'green');
+    assert.strictEqual(parseCheckRuns([ok('a')], req), 'pending');
+    assert.strictEqual(parseCheckRuns([ok('a'), { name: 'b', status: 'in_progress' }], req), 'pending');
+    assert.strictEqual(parseCheckRuns([ok('a'), { name: 'b', status: 'completed', conclusion: 'failure' }], req), 'failed');
+    assert.strictEqual(parseCheckRuns([ok('a'), { name: 'b', status: 'completed', conclusion: 'skipped' }], req), 'failed');
+    assert.strictEqual(parseCheckRuns([ok('x')], req), 'pending');
+    assert.strictEqual(parseCheckRuns([], req), 'pending');
+    assert.strictEqual(parseCheckRuns(null, req), 'pending');
+  });
+
+  // ---- R7 — --repo binds every gh call -----------------------------------------------------------
+
+  test('R7: pr list is bound by --repo (key search path)', async () => {
+    const r = await run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], list: { 'KAN-1': [OPEN('KAN-1', 11)] } });
+    const lists = r.gh.filter((x) => x[0] === 'pr' && x[1] === 'list');
+    assert.strictEqual(lists.length, 1);
+    assert.strictEqual(lists[0][lists[0].indexOf('--repo') + 1], 'Riniro/test');
+  });
+
+  test('R7: pr view (stored association) is bound by --repo', async () => {
+    const r = await run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], prLinks: [{ issueKey: 'KAN-1', prNumber: 11 }], view: { 11: OPEN('KAN-1', 11) } });
+    const views = r.gh.filter((x) => x[0] === 'pr' && x[1] === 'view');
+    assert.strictEqual(views.length, 1);
+    assert.strictEqual(views[0][views[0].indexOf('--repo') + 1], 'Riniro/test');
+  });
+
+  test('R7: gh api carries repos/<repo>/ in the endpoint path', async () => {
+    const r = await run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], list: { 'KAN-1': [MERGED('KAN-1', 11)] }, api: { runs: GREEN } });
+    const apis = r.gh.filter((x) => x[0] === 'api');
+    assert.ok(apis.length >= 1);
+    for (const x of apis) assert.ok(x[1].startsWith('repos/Riniro/test/commits/m11/check-runs'), x[1]);
+  });
+
+  // ---- R8 — pickup never declares merge readiness -------------------------------------------------
+
+  test('R8: open PR → work:false, no readiness claim in the output, no Jira writes', async () => {
+    const r = await run({ awaiting: [issue('KAN-1', 'ai-awaiting-merge')], list: { 'KAN-1': [OPEN('KAN-1', 11)] } });
+    assert.strictEqual(r.status, 3);
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.issue, null);
+    assert.deepStrictEqual(Object.keys(r.out).sort(), ['counts', 'issue', 'pr', 'reason', 'work']);
+    assert.deepStrictEqual(Object.keys(r.out.pr).sort(), ['mergeCommit', 'number', 'state', 'url']);
+    assert.deepStrictEqual(Object.keys(r.out.counts).sort(), ['awaitingMerge', 'ready']);
+    const text = JSON.stringify(r.out);
+    assert.ok(!/ready_for_merge|readiness|confirmed|verdict|"ci"|accept/i.test(text), 'no readiness wording: ' + text);
+    assert.deepStrictEqual(r.jiraCalls.filter((c) => !c.startsWith('GET ')), [], 'no Jira writes');
   });
 });

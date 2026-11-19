@@ -12,6 +12,8 @@ import {
   setLabels,
   transition,
   addComment,
+  getComments,
+  getMyself,
   JiraError,
 } from '../tools/jira/client.js';
 
@@ -382,16 +384,27 @@ describe('getIssue', () => {
 // -- setLabels -------------------------------------------------------
 
 describe('setLabels', () => {
-  it('sends a POST with new labels', async () => {
+  it('sends a PUT with new labels', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await setLabels({ creds, key: 'KAN-42', labels: ['new-label', 'another'], fetchImpl });
+    assert.strictEqual(capturedMethod, 'PUT');
     assert.deepStrictEqual(capturedBody, { fields: { labels: ['new-label', 'another'] } });
+  });
+
+  it('returns undefined on 204 No Content', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+
+    const result = await setLabels({ creds, key: 'KAN-42', labels: [], fetchImpl });
+    assert.strictEqual(result, undefined);
   });
 
   it('throws SOURCE_UNAVAILABLE on network error', async () => {
@@ -403,6 +416,23 @@ describe('setLabels', () => {
       (err) => err.code === 'SOURCE_UNAVAILABLE'
     );
   });
+
+  it('fails when server returns 405 for POST — proves setLabels uses PUT', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
+    const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
+      // If the caller tries POST, reject with 405 (Jira behaviour)
+      if (init.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 405, json: () => Promise.resolve({}) });
+      }
+      // Accept the correct method (PUT)
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+    };
+
+    await setLabels({ creds, key: 'KAN-42', labels: ['a'], fetchImpl });
+    assert.strictEqual(capturedMethod, 'PUT');
+  });
 });
 
 // -- transition ------------------------------------------------------
@@ -410,26 +440,40 @@ describe('setLabels', () => {
 describe('transition', () => {
   it('sends a POST with transition id', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await transition({ creds, key: 'KAN-42', transitionId: 5, fetchImpl });
+    assert.strictEqual(capturedMethod, 'POST');
     assert.deepStrictEqual(capturedBody, { transition: { id: '5' } });
   });
 
   it('sends string transitionId as string', async () => {
     const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    let capturedMethod = null;
     let capturedBody = null;
     const fetchImpl = (url, init) => {
+      capturedMethod = init.method;
       capturedBody = JSON.parse(init.body);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
     };
 
     await transition({ creds, key: 'KAN-42', transitionId: 'done', fetchImpl });
+    assert.strictEqual(capturedMethod, 'POST');
     assert.deepStrictEqual(capturedBody, { transition: { id: 'done' } });
+  });
+
+  it('returns undefined on 204 No Content', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) });
+
+    const result = await transition({ creds, key: 'KAN-42', transitionId: 5, fetchImpl });
+    assert.strictEqual(result, undefined);
   });
 
   it('throws SOURCE_UNAVAILABLE on network error', async () => {
@@ -464,6 +508,126 @@ describe('addComment', () => {
 
     await assert.rejects(
       addComment({ creds, key: 'KAN-42', body: 'comment', fetchImpl }),
+      (err) => err.code === 'SOURCE_UNAVAILABLE'
+    );
+  });
+});
+
+// -- getComments -----------------------------------------------------
+
+describe('getComments', () => {
+  it('returns two comment objects in order with authorAccountId', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'first comment', author: { accountId: 'user1' } },
+        { id: '2', body: 'second comment', author: { accountId: 'user2' } },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 2);
+    assert.deepStrictEqual(result[0], { body: 'first comment', authorAccountId: 'user1' });
+    assert.deepStrictEqual(result[1], { body: 'second comment', authorAccountId: 'user2' });
+  });
+
+  it('returns authorAccountId null when no author', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'orphan comment' },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 1);
+    assert.deepStrictEqual(result[0], { body: 'orphan comment', authorAccountId: null });
+  });
+
+  it('drops comments where body is not a string', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      comments: [
+        { id: '1', body: 'valid' },
+        { id: '2', body: 42 },
+        { id: '3', body: 'also valid' },
+      ],
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getComments({ creds, key: 'KAN-42', fetchImpl });
+    assert.strictEqual(result.length, 2);
+    assert.strictEqual(result[0].body, 'valid');
+    assert.strictEqual(result[1].body, 'also valid');
+  });
+
+  it('throws AUTH_FAILED on 401', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+
+    await assert.rejects(
+      getComments({ creds, key: 'KAN-42', fetchImpl }),
+      (err) => err.code === 'AUTH_FAILED'
+    );
+  });
+
+  it('throws SOURCE_UNAVAILABLE on network error', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = makeFetchError;
+
+    await assert.rejects(
+      getComments({ creds, key: 'KAN-42', fetchImpl }),
+      (err) => err.code === 'SOURCE_UNAVAILABLE'
+    );
+  });
+});
+
+// -- getMyself -------------------------------------------------------
+
+describe('getMyself', () => {
+  it('returns accountId from response', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      accountId: 'abc123',
+      emailAddress: 'test@example.com',
+      displayName: 'Test User',
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getMyself({ creds, fetchImpl });
+    assert.deepStrictEqual(result, { accountId: 'abc123' });
+  });
+
+  it('returns accountId null when field is missing', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const stubResponse = {
+      emailAddress: 'test@example.com',
+      displayName: 'Test User',
+    };
+    const fetchImpl = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(stubResponse) });
+
+    const result = await getMyself({ creds, fetchImpl });
+    assert.deepStrictEqual(result, { accountId: null });
+  });
+
+  it('throws AUTH_FAILED on 401', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+
+    await assert.rejects(
+      getMyself({ creds, fetchImpl }),
+      (err) => err.code === 'AUTH_FAILED'
+    );
+  });
+
+  it('throws SOURCE_UNAVAILABLE on network error', async () => {
+    const creds = { site: 'https://jira.example.com', email: 'test@example.com', token: 'secret' };
+    const fetchImpl = makeFetchError;
+
+    await assert.rejects(
+      getMyself({ creds, fetchImpl }),
       (err) => err.code === 'SOURCE_UNAVAILABLE'
     );
   });
