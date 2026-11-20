@@ -31,7 +31,16 @@ function mkTmp(prefix) {
 function rmTmp(dir) {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(lockSpyLogOf(dir), { force: true });
   } catch { /* каталог мог быть уже удалён */ }
+}
+
+// Every CLI run records the lock tokens it writes (test/helpers/lock-token-spy.cjs), in a file NEXT TO the
+// state directory (inside it the file would show up in the journal dump). See lockTokensOf().
+const LOCK_SPY = path.join(path.dirname(fileURLToPath(import.meta.url)), 'helpers', 'lock-token-spy.cjs');
+function lockSpyLogOf(stateDir) { return stateDir + '.lock-tokens'; }
+function lockTokensOf(stateDir) {
+  try { return fs.readFileSync(lockSpyLogOf(stateDir), 'utf8').split(/\r?\n/).filter(Boolean); } catch { return []; }
 }
 
 /** Ждёт появления файла, опрашивая его; возвращает false по истечении потолка. */
@@ -267,7 +276,11 @@ function runCliEnv(args, stateDir, extraEnv = {}) {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 30000,
-    env: { ...process.env, ...safeCredentialsEnv(), COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
+    env: {
+      ...process.env, ...safeCredentialsEnv(), COORDINATOR_STATE_DIR: stateDir, ...extraEnv,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, '--require=' + LOCK_SPY].filter(Boolean).join(' '),
+      LOCK_SPY_LOG: lockSpyLogOf(stateDir),
+    },
   });
 }
 
@@ -1262,6 +1275,8 @@ function stateDump(stateDir) {
 function assertNoSecrets(r, c, label) {
   const all = (r.stdout || '') + (r.stderr || '') + stateDump(c.stateDir);
   for (const sct of SECRETS) assert.ok(!all.includes(sct), `${label}: the secret ${sct.slice(0, 12)}… must not appear in stdout, stderr or the journal`);
+  // The lock token is a credential of the lock too: it never leaves the process in any output.
+  for (const tok of lockTokensOf(c.stateDir)) assert.ok(!all.includes(tok), `${label}: the lock token must not appear in stdout, stderr or the journal`);
 }
 
 function isAlive(pid) {
@@ -1429,6 +1444,106 @@ test('S6/R1: a gate that dies without an answer (killed) → the attempt is unre
   const r = runStart(c, env);
   assertUnresolvedAttempt(c, r, 1, 'killed gate');
   assert.equal(readRecord(c.scratch, c.stateDir).claim, null);
+});
+
+// What this test is, and what it is not. It checks the ERROR OF GETTING THE RESULT OF THE CHILD PROCESS:
+// the gate writes more than spawnSync's 1 MiB buffer, so spawnSync reports error=ENOBUFS and status=null,
+// and the route takes the `cl.code === null` branch (no result of the gate was received). It does NOT
+// reproduce a gate timeout in the middle of a PUT request, and it does not wait the 120 s of that
+// timeout. The behaviour it protects is the same: a gate whose result is unknown may have changed the
+// labels, so the attempt stays and the route reports it.
+test('S7/F1: the error of getting the gate result (ENOBUFS, no status) → the attempt stays unresolved, ORPHANED_CLAIM printed, no executor', async (t) => {
+  const c = newCase('cli-s7-');
+  const gatePidFile = path.join(c.scratch, 'gate-pid');
+  const mark = path.join(c.scratch, 'labels-changed');
+  let gatePid = null;
+  t.after(() => {
+    // the gate stub is ours: killed by pid in every outcome (it also ends itself after 20 s)
+    if (gatePid) { try { process.kill(gatePid, 'SIGKILL'); } catch { /* gone */ } }
+    c.cleanup();
+  });
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_BIG: '1', CL_PID_FILE: gatePidFile, CL_MUTATE_MARK: mark } });
+  const r = runStart(c, env);
+  gatePid = fs.existsSync(gatePidFile) ? Number(fs.readFileSync(gatePidFile, 'utf8')) : null;
+  assert.ok(gatePid, 'premise: the gate stub was reached');
+  assert.ok(fs.existsSync(mark), 'premise: the gate had already changed the labels when its result got lost');
+  assert.equal(claimCalls(c.scratch).length, 1);
+
+  const a = assertUnresolvedAttempt(c, r, 1, 'ENOBUFS gate');
+  assert.match(a.reason, /did not run to completion/, 'it is the branch "no result of the gate was received"');
+  assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'no accepted result');
+  // no executor: the marker file only the executor writes does not exist (checked in assertUnresolvedAttempt too)
+  assert.ok(!fs.existsSync(c.marker));
+
+  // nothing of ours is left: the gate stub is gone (bounded wait)
+  const deadline = Date.now() + 10000;
+  while (isAlive(gatePid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(!isAlive(gatePid), 'the gate stub process is gone');
+});
+
+// ---------------------------------------------------------------------------
+// S7/F2 — the answer of the gate is read as a whole. A PAIR: the two tests differ in exactly one thing,
+// the garbage after the document. The first shows that the answer itself is good enough to drop the
+// attempt; the second shows that the same answer with garbage does not.
+// ---------------------------------------------------------------------------
+const NO_MUTATION_ANSWER = JSON.stringify({ success: false, reason: 'not_ready', state: 'not_ready', mutationAttempted: false });
+
+test('S7/F2 (1 of 2): a whole answer with mutationAttempted:false and code 3 → the attempt is removed, the gate code is returned', (t) => {
+  const c = newCase('cli-s7-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, { code: 3, extra: { CL_OUT: NO_MUTATION_ANSWER } });
+  const r = runStart(c, env);
+  assertRefused(r, { code: 3, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null, 'removed');
+  assert.doesNotMatch(r.stderr, /ORPHANED_CLAIM/);
+});
+
+for (const [name, tail] of [
+  ['garbage text after the document', '\ngarbage'],
+  ['a second document after it', '\n{"mutationAttempted":true}'],
+]) {
+  test(`S7/F2 (2 of 2): the SAME answer plus ${name} → unknown result: the attempt is NOT removed, ORPHANED_CLAIM printed`, (t) => {
+    const c = newCase('cli-s7-');
+    t.after(c.cleanup);
+    const env = prepareRoute(c.scratch, c.stateDir, { code: 3, extra: { CL_OUT: NO_MUTATION_ANSWER + tail } });
+    const r = runStart(c, env);
+    assertUnresolvedAttempt(c, r, 3, name);
+    assert.equal(claimCalls(c.scratch).length, 1);
+  });
+}
+
+test('S7/F2: surrounding whitespace is allowed, a wrong type of the whole is not', (t) => {
+  // whitespace around the one document: still a whole answer
+  let c = newCase('cli-s7-');
+  try {
+    const env = prepareRoute(c.scratch, c.stateDir, { code: 3, extra: { CL_OUT: '  \n\t' + NO_MUTATION_ANSWER + '  \n\n' } });
+    const r = runStart(c, env);
+    assertRefused(r, { code: 3, marker: c.marker, stateDir: c.stateDir });
+    assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null);
+  } finally { c.cleanup(); }
+  // the statement wrapped in a list is the wrong structure: not an answer
+  c = newCase('cli-s7-');
+  try {
+    const env = prepareRoute(c.scratch, c.stateDir, { code: 3, extra: { CL_OUT: '[' + NO_MUTATION_ANSWER + ']' } });
+    assertUnresolvedAttempt(c, runStart(c, env), 3, 'list');
+  } finally { c.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// S7/N1 — precheck: when the candidate could not be saved, it is not printed as if it were
+// ---------------------------------------------------------------------------
+test('S7/N1: precheck whose candidate cannot be saved → 5, and NOTHING about the candidate on stdout', (t) => {
+  const c = newCase('cli-s7-');
+  t.after(c.cleanup);
+  seedPatch(c.scratch, c.stateDir, { candidate: freshCandidate({ issueKey: 'KAN-1' }) });
+  // journal.bak.json as a directory: the next write cannot back the previous record up, so it throws
+  fs.mkdirSync(path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.bak.json'));
+  const r = runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {}));
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stderr, /PRECHECK: the candidate was not saved/);
+  assert.equal(r.stdout.trim(), '', 'stdout is empty: the candidate is not reported when it was not saved');
+  assert.ok(!r.stdout.includes('"candidate"') && !r.stdout.includes('KAN-14'));
+  assert.equal(readRecord(c.scratch, c.stateDir).candidate.issueKey, 'KAN-1', 'the journal still holds the old candidate');
 });
 
 // ---------------------------------------------------------------------------
@@ -1642,6 +1757,32 @@ test('S6/R5: the refusals 14 and 10 print no secret (planted in the environment 
   const r14 = runStart(c, withSecrets(env));
   assert.equal(r14.status, 14);
   assertNoSecrets(r14, c, '14');
+  // and 10: the journal cannot be read (the lock is taken first, so a lock token exists in this run)
+  const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  fs.writeFileSync(jf, '{ this is not json');
+  const r10 = runStart(c, withSecrets(env));
+  assert.equal(r10.status, 10, r10.stdout + r10.stderr);
+  assertNoSecrets(r10, c, '10');
+});
+
+test('S7/N2: the lock token spy sees the REAL token (so that "the token is not printed" is not vacuous)', (t) => {
+  const c = newCase('cli-s7-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  const probe = path.join(c.scratch, 'owner-probe.mjs');
+  // the executor reads the lock owner file of THIS run: that is the token the lock really holds
+  fs.writeFileSync(probe, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    `const lock = path.join(${JSON.stringify(c.stateDir)}, ${JSON.stringify(repoKeyOf(c.scratch))}, 'lock', 'owner.json');`,
+    `fs.writeFileSync(${JSON.stringify(c.marker)}, JSON.parse(fs.readFileSync(lock, 'utf8')).token);`,
+  ].join('\n'));
+  const r = runStart(c, env, { tail: [process.execPath, probe] });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const real = fs.readFileSync(c.marker, 'utf8');
+  assert.ok(real.length > 10, 'premise: the lock holds a token');
+  assert.ok(lockTokensOf(c.stateDir).includes(real), 'the spy recorded exactly that token');
+  assertNoSecrets(r, c, 'successful start');
 });
 
 test('S6/R5: only the claim gate is real: it reaches the local listener alone, with test credentials; its "no mutation" answer removes the attempt', async (t) => {

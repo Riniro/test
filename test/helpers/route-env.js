@@ -55,10 +55,14 @@ export function writeStubs(dir) {
     // Models a gate that has reported the change and is then cut off: it publishes its pid and waits, BOUNDED
     // by CL_HANG_MS (default 15 s) so that it can never outlive a failed test for long.
     "if (process.env.CL_HANG_FILE) { fs.writeFileSync(process.env.CL_HANG_FILE, String(process.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CL_HANG_MS || 15000)); }",
+    // Publishes the gate's own pid, so that a test can kill and check exactly this process.
+    "if (process.env.CL_PID_FILE) fs.writeFileSync(process.env.CL_PID_FILE, String(process.pid));",
+    // A gate whose output is larger than spawnSync's buffer (1 MiB): the parent gets ENOBUFS and no status.
+    // Bounded: it ends by itself after 20 s even if nobody ever reads or kills it.
+    "if (process.env.CL_BIG) { setTimeout(() => process.exit(0), 20000); process.stdout.write('x'.repeat(3 * 1024 * 1024), () => process.exit(0)); }",
     // A gate that dies without an answer.
     "if (process.env.CL_SELF_KILL) process.kill(process.pid, 'SIGKILL');",
-    "process.stdout.write((process.env.CL_OUT || '') + '\\n');",
-    'process.exit(Number(process.env.CL_CODE || 0));',
+    "if (!process.env.CL_BIG) { process.stdout.write((process.env.CL_OUT || '') + '\\n'); process.exit(Number(process.env.CL_CODE || 0)); }",
   ].join('\n'));
   fs.writeFileSync(gh, [
     "import fs from 'node:fs';",

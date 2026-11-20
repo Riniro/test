@@ -368,18 +368,17 @@ async function main({ argv, cwd, env } = {}) {
   return 0;
 }
 
-/** Parses the last JSON object printed on stdout; null when there is none. */
+/**
+ * Parses the WHOLE output as ONE JSON object; null otherwise. Only the whitespace JSON itself allows
+ * may surround the document. Extra text next to it, a second document, a cut-off answer, a list or a
+ * scalar are "no answer": a parser that picks a convenient piece finds a statement where there is no
+ * whole statement (contract: "Ответ разбирается целиком").
+ */
 function parseJsonOutput(text) {
-  const t = String(text || '').trim();
-  if (!t) return null;
-  const candidates = [t, ...t.split('\n').map((l) => l.trim()).filter(Boolean).reverse()];
-  for (const c of candidates) {
-    try {
-      const v = JSON.parse(c);
-      if (v !== null && typeof v === 'object' && !Array.isArray(v)) return v;
-    } catch { /* try the next candidate */ }
-  }
-  return null;
+  try {
+    const v = JSON.parse(String(text === undefined || text === null ? '' : text));
+    return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch { return null; }
 }
 
 function runNodeScript({ script, argv, cwd, env }) {
