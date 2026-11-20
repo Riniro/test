@@ -48,6 +48,15 @@ export function writeStubs(dir) {
     "import fs from 'node:fs';",
     "if (process.env.CL_LOG) fs.appendFileSync(process.env.CL_LOG, process.argv.slice(2).join(' ') + '\\n');",
     "if (process.env.CL_SABOTAGE_JOURNAL) { fs.rmSync(process.env.CL_SABOTAGE_JOURNAL, { force: true }); fs.mkdirSync(process.env.CL_SABOTAGE_JOURNAL); }",
+    // The journal as the gate sees it when it is called: proves what was on disk BEFORE the gate.
+    "if (process.env.CL_PEEK_JOURNAL) { let t; try { t = fs.readFileSync(process.env.CL_PEEK_JOURNAL, 'utf8'); } catch { t = 'UNREADABLE'; } fs.appendFileSync(process.env.CL_PEEK_OUT, t + '\\n'); }",
+    // Models "the gate changed the labels": a file stands for the label change in Jira.
+    "if (process.env.CL_MUTATE_MARK) fs.appendFileSync(process.env.CL_MUTATE_MARK, 'labels changed\\n');",
+    // Models a gate that has reported the change and is then cut off: it publishes its pid and waits, BOUNDED
+    // by CL_HANG_MS (default 15 s) so that it can never outlive a failed test for long.
+    "if (process.env.CL_HANG_FILE) { fs.writeFileSync(process.env.CL_HANG_FILE, String(process.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.CL_HANG_MS || 15000)); }",
+    // A gate that dies without an answer.
+    "if (process.env.CL_SELF_KILL) process.kill(process.pid, 'SIGKILL');",
     "process.stdout.write((process.env.CL_OUT || '') + '\\n');",
     'process.exit(Number(process.env.CL_CODE || 0));',
   ].join('\n'));

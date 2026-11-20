@@ -773,6 +773,9 @@ async function waitFor(file, ms = 15000) {
 /**
  * Runs main() with stderr captured; restored in finally. stdout is NOT captured: under `node --test` a test file
  * reports its results to the runner through stdout, and a swallowed write is a swallowed test result.
+ * The result therefore has NO `stdout` field: an assertion on `res.stdout` would compare `undefined`, and
+ * the earlier version of these tests had exactly such assertions, which could never fail. What the route
+ * prints to stdout is checked in the process tests, where stdout is a real pipe.
  */
 async function captureMain(opts) {
   const err = [];
@@ -780,7 +783,7 @@ async function captureMain(opts) {
   process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
   try {
     const rc = await main(opts);
-    return { rc, stdout: '', stderr: err.join('') };
+    return { rc, stderr: err.join('') };
   } finally {
     process.stderr.write = ew;
   }
@@ -841,10 +844,10 @@ test('R3: the accepted result expires between its save and the spawn → 16, no 
   assert.ok(!fs.existsSync(rt.marker), 'the executor must not have been started');
   assert.equal(rt.claimCalls(), 1, 'the claim happened');
   assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held, 'the lock is released');
-  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.orphanedClaim;
-  assert.ok(o, 'an orphanedClaim must be written');
+  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.claimAttempt;
+  assert.ok(o, 'an unresolved claimAttempt must be written');
   assert.equal(o.code, 16);
-  assert.equal(o.state, 'claimed');
+  assert.equal(o.stage, 'unresolved');
   assert.match(res.stderr, /ORPHANED_CLAIM: KAN-14 implement code=16 /);
 });
 
@@ -872,8 +875,8 @@ test('R3: start — the accepted result read back differs from the one written �
   assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held);
   const rec = readJournal({ stateDir, repoKey: rt.repoKey }).record;
   assert.deepStrictEqual(rec.claim, DIFFERENT_CLAIM, 'premise: the divergence really happened');
-  assert.ok(rec.orphanedClaim, 'an orphanedClaim must be written');
-  assert.equal(rec.orphanedClaim.code, 5);
+  assert.ok(rec.claimAttempt, 'an unresolved claimAttempt must be written');
+  assert.equal(rec.claimAttempt.code, 5);
   assert.match(res.stderr, /ORPHANED_CLAIM: KAN-14 implement code=5 .*not saved/);
 });
 
@@ -893,15 +896,15 @@ test('R3: precheck — the candidate read back differs from the one written → 
   } finally {
     restore();
   }
-  assert.equal(res.rc, 5, res.stdout + res.stderr);
-  assert.doesNotMatch(res.stdout, /"candidate"/, 'the candidate must not be reported as saved');
+  assert.equal(res.rc, 5, res.stderr);
+  assert.match(res.stderr, /PRECHECK: the candidate was not saved/);
   assert.deepStrictEqual(readJournal({ stateDir, repoKey }).record.candidate, other, 'premise: the divergence really happened');
 });
 
 // ------------------------------------------------------------------
 // R4 — signals are handled from the moment the lock is taken
 // ------------------------------------------------------------------
-test('R4: a signal between the lock and the spawn (during the synchronous gate calls) → no executor, the lock is released, non-zero code', async (t) => {
+test('R4 (emulated signal): a signal between the lock and the spawn (during the synchronous gate calls) → no executor, the lock is released, non-zero code', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
   const rt = countingRoute(stateDir);
@@ -919,11 +922,11 @@ test('R4: a signal between the lock and the spawn (during the synchronous gate c
   assert.ok(!fs.existsSync(rt.marker), 'the executor must not have been started');
   assert.equal(rt.claimCalls(), 0, 'nothing was captured: the stop is before the claim');
   assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held, 'the lock is released');
-  assert.equal(readJournal({ stateDir, repoKey: rt.repoKey }).record.orphanedClaim, null, 'nothing was captured, so no orphan');
+  assert.equal(readJournal({ stateDir, repoKey: rt.repoKey }).record.claimAttempt, null, 'nothing was attempted, so no claim attempt');
   assert.equal(process.listenerCount('SIGTERM'), baseline, 'the handler is removed');
 });
 
-test('R4: a signal after the claim but before the spawn → no executor, lock released, and an orphan (the labels changed)', async (t) => {
+test('R4 (emulated signal): a signal after the claim but before the spawn → no executor, lock released, and an orphan (the labels changed)', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
   const rt = countingRoute(stateDir);
@@ -942,8 +945,8 @@ test('R4: a signal after the claim but before the spawn → no executor, lock re
   assert.ok(!fs.existsSync(rt.marker));
   assert.equal(rt.claimCalls(), 1);
   assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held);
-  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.orphanedClaim;
-  assert.ok(o, 'an orphanedClaim must be written');
+  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.claimAttempt;
+  assert.ok(o, 'an unresolved claimAttempt must be written');
   assert.equal(o.code, 130);
   assert.match(res.stderr, /ORPHANED_CLAIM: KAN-14 implement code=130 .*SIGINT/);
   assert.equal(process.listenerCount('SIGINT'), baseline, 'the handler is removed');
@@ -960,7 +963,32 @@ function writeLongChild(dir, readyFile, goFile) {
   return script;
 }
 
-test('R4: a signal while the executor works is FORWARDED, and the lock is NOT released until the executor has actually finished', async (t) => {
+// ---------------------------------------------------------------------------------------------
+// WHAT THE SIGNAL TESTS PROVE, AND WHAT THEY CANNOT.
+// `process.emit('SIGTERM')` runs the handlers the route registered with process.on(); it is NOT a system
+// signal delivered by Windows. On this platform a console signal (Ctrl+C / CTRL_BREAK) cannot be sent to
+// a child from a test, and process.kill(pid, 'SIGTERM') terminates the target outright without running
+// its handlers. So the tests below prove: (1) the route's handlers do the right thing when they are invoked,
+// (2) forwarding goes to THIS run's executor (its pid), (3) the lock outlives the signal until the executor
+// has exited. They do NOT prove that Windows delivers a signal to the handlers; that stays unproven here.
+//
+// Both tests are bounded: no wait is unbounded, and whatever happens, the executor process of the test is
+// killed BY PID in `finally`, so a broken forward() fails the test within seconds instead of hanging it.
+// ---------------------------------------------------------------------------------------------
+const SIGNAL_BOUND_MS = 8000;
+
+function killPid(pid) {
+  if (!pid) return;
+  try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+}
+
+async function within(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('TIMEOUT'), ms); });
+  try { return await Promise.race([promise, timeout]); } finally { clearTimeout(timer); }
+}
+
+test('R4 (emulated signal): the handler FORWARDS to THIS run\'s executor (by pid), and the lock is NOT released until the executor has actually finished', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
   const rt = countingRoute(stateDir);
@@ -971,34 +999,40 @@ test('R4: a signal while the executor works is FORWARDED, and the lock is NOT re
 
   // On Windows kill() ends a process at once, so a child that "outlives" the signal cannot exist there:
   // the forwarding is observed through kill() and the child is kept alive, which is exactly the situation
-  // "the executor is still working" that the lock rule is about.
+  // "the executor is still working" that the lock rule is about. The record is keyed by the PID of the
+  // receiver: a call on any other ChildProcess (a gate, a pickup) is not counted.
   const realKill = ChildProcess.prototype.kill;
   const kills = [];
-  ChildProcess.prototype.kill = function patchedKill(sig) { kills.push(sig); return true; };
+  ChildProcess.prototype.kill = function patchedKill(sig) { kills.push({ pid: this.pid, sig }); return true; };
   let p;
+  let childPid = null;
   try {
     p = rt.run();
     assert.ok(await waitFor(ready), 'the executor must start');
+    childPid = Number(fs.readFileSync(ready, 'utf8'));
     assert.ok(status({ stateDir, repoKey: rt.repoKey }).held, 'the lock is held while the executor works');
 
     process.emit('SIGTERM', 'SIGTERM');
-    assert.deepStrictEqual(kills, ['SIGTERM'], 'the signal is passed to the child');
+    assert.deepStrictEqual(kills.filter((k) => k.pid === childPid).map((k) => k.sig), ['SIGTERM'], 'the signal is passed to the executor of this run');
+    assert.deepStrictEqual(kills.filter((k) => k.pid !== childPid), [], 'and to nothing else');
     await sleep(300); // bounded: the only way to show that something did NOT happen
     assert.ok(status({ stateDir, repoKey: rt.repoKey }).held, 'the lock must stay while the executor is still alive');
 
     fs.writeFileSync(go, 'x');
-    const res = await p;
+    const res = await within(p, SIGNAL_BOUND_MS);
+    assert.notEqual(res, 'TIMEOUT', 'the route must finish once the executor has');
     assert.equal(res.rc, 0, 'the code of the executor, which has now finished');
     assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held, 'released only after the executor is gone');
     assert.equal(process.listenerCount('SIGTERM'), baseline, 'the handler is removed');
   } finally {
     ChildProcess.prototype.kill = realKill;
     try { fs.writeFileSync(go, 'x'); } catch { /* gone */ }
-    if (p) await p.catch(() => {});
+    killPid(childPid);
+    if (p) await within(p.catch(() => {}), SIGNAL_BOUND_MS);
   }
 });
 
-test('R4: a signal while the executor works and the child REALLY ends → the lock is released after it, the executor process is gone', async (t) => {
+test('R4 (emulated signal): after the handler ran, the executor REALLY ends → the lock is released after it, the executor process is gone, and the test cannot hang', async (t) => {
   const stateDir = tmpDir();
   t.after(() => cleanup(stateDir));
   const rt = countingRoute(stateDir);
@@ -1008,11 +1042,15 @@ test('R4: a signal while the executor works and the child REALLY ends → the lo
   const baseline = process.listenerCount('SIGTERM');
 
   const p = rt.run();
+  let childPid = null;
   try {
-    assert.ok(await waitFor(ready));
-    const childPid = Number(fs.readFileSync(ready, 'utf8'));
+    assert.ok(await waitFor(ready), 'the executor must start');
+    childPid = Number(fs.readFileSync(ready, 'utf8'));
     process.emit('SIGTERM', 'SIGTERM');
-    const res = await p;
+    // BOUNDED: without a working forward() the executor never ends (its go file is never created), and an
+    // unbounded `await p` here hung the whole suite when `child.kill` was removed from forward().
+    const res = await within(p, SIGNAL_BOUND_MS);
+    assert.notEqual(res, 'TIMEOUT', 'the handler did not stop the executor: the signal was not forwarded');
     assert.notEqual(res.rc, 0, 'the executor was stopped by the signal');
     assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held, 'the lock is released once the executor is gone');
     let alive = true;
@@ -1020,8 +1058,9 @@ test('R4: a signal while the executor works and the child REALLY ends → the lo
     assert.ok(!alive, 'no executor process is left');
     assert.equal(process.listenerCount('SIGTERM'), baseline);
   } finally {
-    fs.writeFileSync(go, 'x');
-    await p.catch(() => {});
+    killPid(childPid); // whatever happened above, nothing of this test stays running
+    try { fs.writeFileSync(go, 'x'); } catch { /* gone */ }
+    await within(p.catch(() => {}), SIGNAL_BOUND_MS);
   }
 });
 
@@ -1050,10 +1089,10 @@ test('R2: an exception after the claim (spawn throws on an invalid command) → 
   assert.notEqual(res.rc, 0, res.stderr);
   assert.equal(rt.claimCalls(), 1);
   assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held);
-  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.orphanedClaim;
-  assert.ok(o, 'an orphanedClaim must be written: ' + res.stderr);
-  assert.match(o.reason, /exception after the claim/);
-  assert.match(res.stderr, /ORPHANED_CLAIM: KAN-14 implement code=1 exception after the claim/);
+  const o = readJournal({ stateDir, repoKey: rt.repoKey }).record.claimAttempt;
+  assert.ok(o, 'an unresolved claimAttempt must be written: ' + res.stderr);
+  assert.match(o.reason, /exception after the claim attempt/);
+  assert.match(res.stderr, /ORPHANED_CLAIM: KAN-14 implement code=1 exception after the claim attempt/);
 });
 
 // ------------------------------------------------------------------
@@ -1070,7 +1109,44 @@ test('R5: the route with the gate scripts NOT replaced fails safely on the local
   assert.match(fs.readFileSync(rt.env.JIRA_CREDENTIALS_FILE, 'utf8'), /127\.0\.0\.1/, 'premise: the credentials point to a local address');
   assert.doesNotMatch(fs.readFileSync(rt.env.JIRA_CREDENTIALS_FILE, 'utf8'), /atlassian/i);
   const res = await rt.run();
-  assert.equal(res.rc, 4, 'the real pickup cannot reach its source: unavailable. ' + res.stderr + res.stdout);
+  assert.equal(res.rc, 4, 'the real pickup cannot reach its source: unavailable. ' + res.stderr);
   assert.ok(!fs.existsSync(rt.marker), 'no executor');
   assert.equal(rt.claimCalls(), 0, 'the stub gate was not involved at all');
+});
+
+// ------------------------------------------------------------------
+// Stage 6, R3.4 (second form) — the attempt IS written, but what reads back is a DIFFERENT valid record.
+// The route cannot tell what is on disk, so it must not call the gate (counter 0) and must return 5.
+// The record that is there stays: it is an attempt, so the follow-up runs are refused with 14.
+// In-process because the divergence must land between the write and its read-back.
+// ------------------------------------------------------------------
+test('S6/R3.4: the attempt reads back differently → 5, the gate counter is 0, no executor; the follow-up precheck and start are refused (14)', async (t) => {
+  const stateDir = tmpDir();
+  t.after(() => cleanup(stateDir));
+  const rt = countingRoute(stateDir);
+  const OTHER = { attemptId: 'someone-else', issueKey: 'KAN-14', mode: 'implement', stage: 'pending', createdAt: '2000-01-01T00:00:00.000Z' };
+
+  const restore = afterFirst('renameSync',
+    (p) => p.endsWith('journal.json') && (() => { try { return JSON.parse(fs.readFileSync(p, 'utf8')).claimAttempt !== null; } catch { return false; } })(),
+    () => { writeJournal({ stateDir, repoKey: rt.repoKey, patch: { claimAttempt: OTHER } }); });
+  let res;
+  try {
+    res = await rt.run();
+  } finally {
+    restore();
+  }
+  assert.equal(res.rc, 5, res.stderr);
+  assert.match(res.stderr, /claim attempt could not be recorded/);
+  assert.equal(rt.claimCalls(), 0, 'the gate was NOT called: the counter of the stub, not the return code');
+  assert.ok(!fs.existsSync(rt.marker), 'the executor must not have been started');
+  assert.ok(!status({ stateDir, repoKey: rt.repoKey }).held, 'the lock is released');
+  assert.deepStrictEqual(readJournal({ stateDir, repoKey: rt.repoKey }).record.claimAttempt, OTHER, 'premise: the divergence really happened');
+
+  // follow-up: both entry points refuse, nothing is called
+  const again = await rt.run();
+  assert.equal(again.rc, 14, again.stderr);
+  assert.equal(rt.claimCalls(), 0, 'the gate is still not called');
+  assert.ok(!fs.existsSync(rt.marker));
+  const pre = await captureMain({ argv: ['precheck', '--project', 'KAN', '--repo', 'o/r'], cwd: process.cwd(), env: rt.env });
+  assert.equal(pre.rc, 14, pre.stderr);
 });

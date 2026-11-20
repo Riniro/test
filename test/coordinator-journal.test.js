@@ -520,34 +520,34 @@ after(() => {
 });
 
 // ------------------------------------------------------------------
-// orphanedClaim: a known key, NOT required, covered by the checksum, null in the previous format
+// claimAttempt: a known key, NOT required, covered by the checksum, null in the previous format
 // ------------------------------------------------------------------
 const ORPHAN = {
-  issueKey: 'KAN-14', mode: 'implement', state: 'claimed', code: 5,
+  attemptId: '5b1c1f0e-0000-4000-8000-000000000001', issueKey: 'KAN-14', mode: 'implement', stage: 'unresolved', code: 5,
   reason: 'the accepted result was not saved to the journal', createdAt: '2026-11-20T02:00:00.000Z',
 };
 
-test('orphanedClaim: stored, read back unchanged, defaults to null, survives later writes, can be set back to null', () => {
+test('claimAttempt: stored, read back unchanged, defaults to null, survives later writes, can be set back to null', () => {
   const repoKey = 'orphan-basic';
   write({ stateDir, repoKey, patch: { stage: 'x' } });
-  assert.equal(read({ stateDir, repoKey }).record.orphanedClaim, null);
-  write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } });
+  assert.equal(read({ stateDir, repoKey }).record.claimAttempt, null);
+  write({ stateDir, repoKey, patch: { claimAttempt: ORPHAN } });
   write({ stateDir, repoKey, patch: { stage: 'running' } });
   const r = read({ stateDir, repoKey });
-  assert.deepStrictEqual(r.record.orphanedClaim, ORPHAN);
-  assert.equal(r.record.orphanedClaim.createdAt, ORPHAN.createdAt, 'its own creation time is not rewritten by a later write');
-  write({ stateDir, repoKey, patch: { orphanedClaim: null } });
-  assert.equal(read({ stateDir, repoKey }).record.orphanedClaim, null);
+  assert.deepStrictEqual(r.record.claimAttempt, ORPHAN);
+  assert.equal(r.record.claimAttempt.createdAt, ORPHAN.createdAt, 'its own creation time is not rewritten by a later write');
+  write({ stateDir, repoKey, patch: { claimAttempt: null } });
+  assert.equal(read({ stateDir, repoKey }).record.claimAttempt, null);
 });
 
-test('orphanedClaim: a field changed INSIDE it breaks the checksum', () => {
+test('claimAttempt: a field changed INSIDE it breaks the checksum', () => {
   const repoKey = 'orphan-checksum';
-  write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } });
+  write({ stateDir, repoKey, patch: { claimAttempt: ORPHAN } });
   const fp = journalPath({ stateDir, repoKey });
   const orig = fs.readFileSync(fp, 'utf8');
   for (const mutate of [(o) => { o.code = 0; }, (o) => { o.issueKey = 'KAN-15'; }, (o) => { o.createdAt = '2030-01-01T00:00:00.000Z'; }]) {
     const rec = JSON.parse(orig);
-    mutate(rec.orphanedClaim);
+    mutate(rec.claimAttempt);
     fs.writeFileSync(fp, JSON.stringify(rec));
     const r = read({ stateDir, repoKey });
     assert.equal(r.ok, false);
@@ -555,7 +555,7 @@ test('orphanedClaim: a field changed INSIDE it breaks the checksum', () => {
   }
 });
 
-test('orphanedClaim: a journal of the previous format (no orphanedClaim) reads as null, passes integrity and is appended', () => {
+test('claimAttempt: a journal of the previous format (no claimAttempt) reads as null, passes integrity and is appended', () => {
   const repoKey = 'orphan-old-format';
   const old = {
     version: 1, issueKey: 'KAN-6', stage: 'planning', runId: null, taskId: null, dispatchIds: [],
@@ -567,7 +567,7 @@ test('orphanedClaim: a journal of the previous format (no orphanedClaim) reads a
   fs.writeFileSync(journalPath({ stateDir, repoKey }), JSON.stringify(old));
   const r = read({ stateDir, repoKey });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.record.orphanedClaim, null);
-  assert.equal(write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } }).ok, true);
-  assert.deepStrictEqual(read({ stateDir, repoKey }).record.orphanedClaim, ORPHAN);
+  assert.equal(r.record.claimAttempt, null);
+  assert.equal(write({ stateDir, repoKey, patch: { claimAttempt: ORPHAN } }).ok, true);
+  assert.deepStrictEqual(read({ stateDir, repoKey }).record.claimAttempt, ORPHAN);
 });

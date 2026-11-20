@@ -63,9 +63,14 @@ function parseArgs(argv) {
 // Output helper
 // ==========================================================================
 
+// Set to true immediately BEFORE the first request that can change Jira (labels or status), so that
+// it is already true when that request is cut short. Every answer states it explicitly: the exit code
+// cannot (6 is returned both before any mutation and after one), and the route must not guess.
+let mutationAttempted = false;
+
 function exitJson(statusCode, body) {
   // `state` is mandatory in every output and equals `reason`.
-  const out = { ...body };
+  const out = { ...body, mutationAttempted };
   if (out.reason !== undefined) out.state = out.reason;
   process.stdout.write(JSON.stringify(out) + '\n');
   process.exit(statusCode);
@@ -326,6 +331,7 @@ export async function main({ argv, env } = {}) {
     let setResult;
     try {
       const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+      mutationAttempted = true;
       await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
       setResult = { ok: true };
     } catch (err) {
@@ -360,6 +366,7 @@ export async function main({ argv, env } = {}) {
     if (args.transitionId) {
       try {
         const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+        mutationAttempted = true;
         await client.transition({ creds, key: args.issue, transitionId: args.transitionId });
       } catch (err) {
         if (err.code === 'AUTH_FAILED') {
@@ -564,6 +571,7 @@ export async function main({ argv, env } = {}) {
     readbackLabels = labelsBefore;
   } else {
     try {
+      mutationAttempted = true;
       await mutateLabels({ creds, key: args.issue, labels: plannedLabels });
     } catch (err) {
       if (err.code === 'AUTH_FAILED') {

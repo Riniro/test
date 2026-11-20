@@ -186,7 +186,7 @@ async function main({ argv, cwd, env } = {}) {
   const repoKey = resolveRepoKey({ cwd });
   if (repoKey === null) {
     process.stderr.write('NOT_A_GIT_REPO\n');
-    return 1; // 14 is the code of an unresolved orphaned claim
+    return 1; // 14 is the code of an unresolved claim attempt
   }
 
   switch (command) {
@@ -233,7 +233,7 @@ async function main({ argv, cwd, env } = {}) {
       if (jr.record) {
         console.log('stage:', jr.record.stage);
         console.log('updatedAt:', jr.record.updatedAt);
-        if (jr.record.orphanedClaim) console.log('orphanedClaim:', JSON.stringify(jr.record.orphanedClaim));
+        if (jr.record.claimAttempt) console.log('claimAttempt:', JSON.stringify(jr.record.claimAttempt));
       }
 
       return lockLocked ? 9 : 0;
@@ -306,7 +306,7 @@ async function main({ argv, cwd, env } = {}) {
         if (rec.taskId !== undefined) console.log('taskId:', rec.taskId);
         if (rec.dispatchIds !== undefined) console.log('dispatchIds:', JSON.stringify(rec.dispatchIds));
         if (rec.prUrl !== undefined) console.log('prUrl:', rec.prUrl);
-        if (rec.orphanedClaim) console.log('orphanedClaim:', JSON.stringify(rec.orphanedClaim));
+        if (rec.claimAttempt) console.log('claimAttempt:', JSON.stringify(rec.claimAttempt));
       } else if (jr.reason) {
         console.log('journal:', jr.reason);
       }
@@ -335,22 +335,23 @@ async function main({ argv, cwd, env } = {}) {
         process.stderr.write('Usage: cli.js clear-orphan --issue <KEY> --confirm --reason "<text>"\n');
         return 2;
       }
-      const cur = orphanOf(stateDir, repoKey);
-      if (!cur) {
+      const att = attemptOf(stateDir, repoKey);
+      if (att.kind === 'unreadable') {
+        // Neither "there is no attempt" nor "cleared": nothing is touched and success is not reported.
+        process.stderr.write('CLEAR_ORPHAN_REFUSED: the journal cannot be read (' + att.reason + '); nothing was cleared\n');
+        return 10;
+      }
+      if (att.kind === 'none') {
         console.log('NO_ORPHANED_CLAIM');
         return 0;
       }
+      const cur = att.attempt && typeof att.attempt === 'object' ? att.attempt : {};
       if (cur.issueKey !== issueArg) {
         console.log('ORPHAN_ISSUE_MISMATCH: the record is for ' + cur.issueKey);
         return 17;
       }
       // Only the journal changes. Nothing is written to Jira: "cleared" means "a human looked and decided".
-      let cleared = false;
-      try {
-        write({ stateDir, repoKey, patch: { orphanedClaim: null } });
-        cleared = orphanOf(stateDir, repoKey) === null;
-      } catch { cleared = false; }
-      if (!cleared) {
+      if (!writeVerified({ stateDir, repoKey, patch: { claimAttempt: null } })) {
         process.stderr.write('CLEAR_ORPHAN_FAILED: the journal could not be updated\n');
         return 1;
       }
@@ -415,14 +416,35 @@ function pickupScriptOf(env) {
   return env.PRECHECK_PICKUP_SCRIPT || path.join(toolsJira, 'pickup.js');
 }
 
-/** The orphaned-claim record of the journal, or null (also when the journal cannot be read). */
-function orphanOf(stateDir, repoKey) {
+/**
+ * The claim attempt of the journal, as THREE answers rather than two:
+ *   none       - the journal reads and holds no attempt (or does not exist yet);
+ *   present    - an attempt is there (any stage);
+ *   unreadable - the journal could not be read: that says nothing about an attempt, and is never "none".
+ */
+function attemptOf(stateDir, repoKey) {
   const jr = readJournal({ stateDir, repoKey });
-  return jr.ok && jr.record.orphanedClaim && typeof jr.record.orphanedClaim === 'object' ? jr.record.orphanedClaim : null;
+  if (jr.ok) {
+    const a = jr.record.claimAttempt;
+    return a === null || a === undefined ? { kind: 'none', attempt: null } : { kind: 'present', attempt: a };
+  }
+  if (jr.reason === 'MISSING') return { kind: 'none', attempt: null };
+  return { kind: 'unreadable', reason: jr.reason };
 }
 
-function orphanSummary(o) {
-  return `${o.issueKey} ${o.mode} code=${o.code} ${o.reason}`;
+function attemptSummary(o) {
+  if (!o || typeof o !== 'object') return 'unrecognised attempt record';
+  return `${o.issueKey} ${o.mode} stage=${o.stage}` + (o.code !== undefined ? ` code=${o.code}` : '');
+}
+
+/** Writes the patch and reads it back; true only when every patched key reads back unchanged. */
+function writeVerified({ stateDir, repoKey, patch }) {
+  try {
+    write({ stateDir, repoKey, patch });
+    const back = readJournal({ stateDir, repoKey });
+    if (!back.ok) return false;
+    return Object.keys(patch).every((k) => JSON.stringify(sortDeep(back.record[k])) === JSON.stringify(sortDeep(patch[k])));
+  } catch { return false; }
 }
 
 /**
@@ -438,11 +460,16 @@ async function precheck({ args, stateDir, repoKey, cwd, env }) {
     process.stderr.write('Usage: cli.js precheck --project K --repo o/n [--project-label pl] [--ci-grace-minutes N] [--base-branch b]\n');
     return 2;
   }
-  // An unresolved orphaned claim: the state of the repository is undefined, so no candidate is written
-  // and nothing else is picked up. Checked before any source is asked.
-  const orphan = orphanOf(stateDir, repoKey);
-  if (orphan) {
-    process.stderr.write('PRECHECK_REFUSED: an orphaned claim is not cleared: ' + orphanSummary(orphan) + '\n');
+  // An unresolved claim attempt: the state of the repository is undefined, so no candidate is written
+  // and nothing else is picked up. Checked before any source is asked. An unreadable journal is a third
+  // answer, not "no attempt".
+  const att = attemptOf(stateDir, repoKey);
+  if (att.kind === 'unreadable') {
+    process.stderr.write('PRECHECK_REFUSED: the journal cannot be read (' + att.reason + '); whether a claim attempt exists is unknown\n');
+    return 10;
+  }
+  if (att.kind === 'present') {
+    process.stderr.write('PRECHECK_REFUSED: a claim attempt is not cleared: ' + attemptSummary(att.attempt) + '\n');
     return 14;
   }
 
@@ -531,26 +558,6 @@ function liveDiscrepancy(candidate, live) {
 }
 
 /**
- * "Captured but not started": the labels have already been changed and the executor will not run.
- * The labels are NEVER put back by the route (a human may have set ai-blocked in between). The fact is
- * written to the journal and ALWAYS printed; if the write failed, ORPHANED_CLAIM_UNRECORDED follows.
- * @returns {number} the code to exit with
- */
-function recordOrphan({ stateDir, repoKey, issueKey, mode, state, code, reason }) {
-  const line = String(reason).replace(/\s+/g, ' ').trim();
-  const orphan = { issueKey, mode, state, code, reason: line, createdAt: new Date().toISOString() };
-  let recorded = false;
-  try {
-    write({ stateDir, repoKey, patch: { orphanedClaim: orphan } });
-    const back = readJournal({ stateDir, repoKey });
-    recorded = back.ok && JSON.stringify(sortDeep(back.record.orphanedClaim)) === JSON.stringify(sortDeep(orphan));
-  } catch { recorded = false; }
-  process.stderr.write(`ORPHANED_CLAIM: ${issueKey} ${mode} code=${code} ${line}\n`);
-  if (!recorded) process.stderr.write('ORPHANED_CLAIM_UNRECORDED\n');
-  return code;
-}
-
-/**
  * start: lock, signal handlers, candidate, orphan, age, issue/mode, live read-only re-read, claim,
  * state/mode, save, age, spawn. The order is the contract.
  * A refusal before the claim spawns nothing, releases the lock and leaves no trace in Jira.
@@ -611,24 +618,45 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
   const stopCode = () => 128 + (signalToNumber(stopSignal) || 0);
 
   let heartbeatTimer = null;
-  // Set at step 7: from here on a refusal is "captured but not started".
-  let captured = null;
-  const orphan = (code, reason) => recordOrphan({
-    stateDir, repoKey, issueKey: captured.issueKey, mode: captured.mode, state: captured.state, code, reason,
-  });
+  // The claim attempt of THIS run: set once it is on disk and read back, i.e. right before the gate.
+  // `settled` is true once its fate is decided (removed on a confirmed outcome, or marked unresolved).
+  let attempt = null;
+  let settled = false;
+  // From the gate call on the labels may have been changed, whatever the gate answers.
+  const unresolved = (code, reason) => {
+    const line = String(reason).replace(/\s+/g, ' ').trim();
+    const rec = { ...attempt, stage: 'unresolved', code, reason: line };
+    const recorded = writeVerified({ stateDir, repoKey, patch: { claimAttempt: rec } });
+    settled = true;
+    // Printed whatever the journal says: when the write failed too, this line is the only evidence.
+    process.stderr.write(`ORPHANED_CLAIM: ${attempt.issueKey} ${attempt.mode} code=${code} ${line}\n`);
+    if (!recorded) process.stderr.write('ORPHANED_CLAIM_UNRECORDED\n');
+    return code;
+  };
+  // A confirmed outcome: the attempt is removed (never the Jira labels).
+  const removeAttempt = () => {
+    const ok = writeVerified({ stateDir, repoKey, patch: { claimAttempt: null } });
+    settled = ok;
+    if (!ok) process.stderr.write('CLAIM_ATTEMPT_NOT_REMOVED: the journal could not be updated; clear-orphan decides\n');
+    return ok;
+  };
 
   try {
     // 3. The candidate must be an object.
     const jr = readJournal({ stateDir, repoKey });
-    // A not-yet-cleared orphaned claim refuses the start BEFORE anything else, in particular before the claim.
-    const pending = jr.ok && jr.record.orphanedClaim && typeof jr.record.orphanedClaim === 'object' ? jr.record.orphanedClaim : null;
-    if (pending) {
-      process.stderr.write('START_REFUSED: an orphaned claim is not cleared: ' + orphanSummary(pending) + '\n');
+    // An unreadable journal is not "no attempt" and not "no candidate": it is a refusal of its own.
+    if (!jr.ok && jr.reason !== 'MISSING') {
+      process.stderr.write('START_REFUSED: the journal cannot be read (' + jr.reason + '); whether a claim attempt exists is unknown\n');
+      return 10;
+    }
+    // A not-yet-cleared claim attempt refuses the start BEFORE anything else, in particular before the claim.
+    if (jr.ok && jr.record.claimAttempt) {
+      process.stderr.write('START_REFUSED: a claim attempt is not cleared: ' + attemptSummary(jr.record.claimAttempt) + '\n');
       return 14;
     }
     const candidate = jr.ok ? jr.record.candidate : null;
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      process.stderr.write('START_REFUSED: no candidate in the journal' + (jr.ok ? '' : ' (journal ' + jr.reason + ')') + '\n');
+      process.stderr.write('START_REFUSED: no candidate in the journal\n');
       return 15;
     }
     // 4. Age from the candidate's own createdAt.
@@ -688,30 +716,47 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       return stopCode();
     }
 
-    // 7. The claim: the only place where labels change.
+    // 7. The claim attempt is written and read back BEFORE the gate: if it cannot be, the gate is not called.
+    const candidateAttempt = {
+      attemptId: crypto.randomUUID(), issueKey: candidate.issueKey, mode: candidate.mode,
+      stage: 'pending', createdAt: new Date().toISOString(),
+    };
+    if (!writeVerified({ stateDir, repoKey, patch: { claimAttempt: candidateAttempt } })) {
+      process.stderr.write('START_REFUSED: the claim attempt could not be recorded; the claim gate was not called\n');
+      return 5;
+    }
+    attempt = candidateAttempt;
+
+    // 8. The claim: the only place where labels change.
     const cl = runNodeScript({
       script: claimScript,
       argv: ['--project', project, '--issue', candidate.issueKey, '--repo', repo, '--adopt-existing'],
       cwd, env,
     });
     if (cl.code === null) {
-      process.stderr.write('START_REFUSED: the claim gate did not run to completion\n');
-      return 1;
+      return unresolved(1, 'the claim gate did not run to completion');
     }
+    const out = parseJsonOutput(cl.stdout);
     if (cl.code !== 0) {
       process.stdout.write(cl.stdout);
-      process.stderr.write('START_REFUSED: the claim gate returned ' + cl.code + '\n');
-      return cl.code;
+      // Only an explicit statement that no mutation was attempted lets the route drop the attempt.
+      // No statement, an unparsable answer, a cut-off answer: a mutation is possible.
+      if (out !== null && out.mutationAttempted === false) {
+        if (removeAttempt()) {
+          process.stderr.write('START_REFUSED: the claim gate returned ' + cl.code + ' without a mutation\n');
+          return cl.code;
+        }
+        return unresolved(cl.code, 'the claim gate returned ' + cl.code + ' without a mutation, but the attempt could not be removed');
+      }
+      return unresolved(cl.code, 'the claim gate returned ' + cl.code + ' and did not state that no mutation was attempted');
     }
     // From here on the labels are changed.
-    const out = parseJsonOutput(cl.stdout);
     const state = out && typeof out.state === 'string' ? out.state : 'unknown';
     const claimMode = out && typeof out.mode === 'string' ? out.mode : null;
-    captured = { issueKey: candidate.issueKey, mode: claimMode !== null ? claimMode : candidate.mode, state };
 
-    // 8. Code 0 is read together with state/mode.
+    // 9. Code 0 is read together with state/mode.
     if (!Object.prototype.hasOwnProperty.call(STARTABLE_CLAIM_STATES, state) || STARTABLE_CLAIM_STATES[state] !== claimMode) {
-      return orphan(5, 'claim returned 0 with an unusable state/mode ' + JSON.stringify([state, claimMode]));
+      return unresolved(5, 'claim returned 0 with an unusable state/mode ' + JSON.stringify([state, claimMode]));
     }
     const prOut = out.pr && typeof out.pr === 'object' ? out.pr : null;
     const livePr = prOut
@@ -724,26 +769,25 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       : null;
     // The last line of defence for the narrow window between the re-read and the claim.
     const late = liveDiscrepancy(candidate, { mode: claimMode, pr: livePr });
-    if (late !== null) return orphan(18, late);
+    if (late !== null) return unresolved(18, late);
 
-    // 9. The accepted result is saved BEFORE the executor starts, and read back.
+    // 10. The accepted result is saved BEFORE the executor starts, together with the stage of the attempt.
     const accepted = { issueKey: candidate.issueKey, state, mode: claimMode, pr: livePr, createdAt: new Date().toISOString() };
-    let saved = false;
-    try {
-      write({ stateDir, repoKey, patch: { issueKey: accepted.issueKey, claim: accepted } });
-      const back = readJournal({ stateDir, repoKey });
-      saved = back.ok && JSON.stringify(sortDeep(back.record.claim)) === JSON.stringify(sortDeep(accepted));
-    } catch { saved = false; }
-    if (!saved) return orphan(5, 'the accepted result was not saved to the journal');
-    // 10. Age of the accepted result.
-    if (!recordFresh(accepted)) return orphan(16, 'the accepted result expired before the executor could start');
-    if (stopped()) return orphan(stopCode(), 'stopped by ' + stopSignal + ' before the executor started');
+    const acceptedAttempt = { ...attempt, stage: 'accepted' };
+    const saved = writeVerified({
+      stateDir, repoKey, patch: { issueKey: accepted.issueKey, claim: accepted, claimAttempt: acceptedAttempt },
+    });
+    if (!saved) return unresolved(5, 'the accepted result was not saved to the journal');
+    attempt = acceptedAttempt;
+    // 11. Age of the accepted result.
+    if (!recordFresh(accepted)) return unresolved(16, 'the accepted result expired before the executor could start');
+    if (stopped()) return unresolved(stopCode(), 'stopped by ' + stopSignal + ' before the executor started');
 
     process.stdout.write(JSON.stringify({ route: { issueKey: accepted.issueKey, mode: accepted.mode, state, headComparable } }) + '\n');
 
     writeJournal({ stateDir, repoKey, patch: { stage: 'running' } });
 
-    // 11. Spawn. Arguments after `--` are passed exactly as given; the task goes in the environment.
+    // 12. Spawn. Arguments after `--` are passed exactly as given; the task goes in the environment.
     child = spawn(childCmd, childArgs, {
       stdio: 'inherit',
       shell: false,
@@ -776,13 +820,14 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       });
     });
     if (result.neverStarted) {
-      orphan(127, 'the executor could not be started: ' + (result.neverStarted.code || result.neverStarted.message));
-      return 127;
+      return unresolved(127, 'the executor could not be started: ' + (result.neverStarted.code || result.neverStarted.message));
     }
+    // The executor of this run has actually finished: the claim has done its work, the attempt goes.
+    removeAttempt();
     return result.code;
   } catch (err) {
-    if (captured === null) throw err;
-    return orphan(1, 'exception after the claim: ' + (err && err.message ? err.message : String(err)));
+    if (attempt === null || settled) throw err;
+    return unresolved(1, 'exception after the claim attempt: ' + (err && err.message ? err.message : String(err)));
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     process.off('SIGINT', onSigint);
@@ -837,7 +882,7 @@ function determineRecovery(lockState, jr, hasOrca, hasGh) {
         reasons.push('lastConfirmedAction.result=pending');
       }
     }
-    // If lastConfirmedAction is null or result != pending, that's good
+    if (jr.record.claimAttempt) reasons.push('claim attempt not cleared: ' + attemptSummary(jr.record.claimAttempt));
   } else if (jr.reason && jr.reason !== 'MISSING') {
     reasons.push('Journal not readable: ' + jr.reason);
   }

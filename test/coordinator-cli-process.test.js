@@ -568,7 +568,7 @@ test('R5.10: lock before journal — a held lock with a MISSING journal is 9, no
   assert.equal(claimCalls(c.scratch).length, 0);
 });
 
-test('R5.10: lock before journal — a held lock with a CORRUPT journal is 9, not 15', (t) => {
+test('R5.10: lock before journal — a held lock with a CORRUPT journal is 9, not 10', (t) => {
   const c = newCase();
   t.after(c.cleanup);
   const env = claimEnv(c.scratch);
@@ -576,7 +576,7 @@ test('R5.10: lock before journal — a held lock with a CORRUPT journal is 9, no
   fs.mkdirSync(path.dirname(jf), { recursive: true });
   fs.writeFileSync(jf, '{ this is not json');
   const control = runStart(c, env);
-  assert.equal(control.status, 15, control.stderr);
+  assert.equal(control.status, 10, control.stderr); // an unreadable journal is a refusal of its own, not "no candidate"
   assert.ok(!lockHeld(c.stateDir));
   holdLock(c.scratch, c.stateDir);
   const r = runStart(c, env);
@@ -653,7 +653,7 @@ test('R2: the gate is asked about the CANDIDATE issue, with --adopt-existing', (
 test('R5.2: the task is blocked between precheck and start → the gate says 3, no executor, no new accepted result', (t) => {
   const c = newCase();
   t.after(c.cleanup);
-  const env = prepareRoute(c.scratch, c.stateDir, { code: 3, out: { success: false, reason: 'blocked', state: 'blocked' } });
+  const env = prepareRoute(c.scratch, c.stateDir, { code: 3, out: { success: false, reason: 'blocked', state: 'blocked', mutationAttempted: false } });
   assertRefused(runStart(c, env), { code: 3, marker: c.marker, stateDir: c.stateDir });
   assert.equal(claimCalls(c.scratch).length, 1, 'the live check really ran');
   assert.equal(readRecord(c.scratch, c.stateDir).claim, null);
@@ -662,39 +662,41 @@ test('R5.2: the task is blocked between precheck and start → the gate says 3, 
 test('R5.8: a mandatory source failed (gate 6) → the route returns 6, no executor', (t) => {
   const c = newCase();
   t.after(c.cleanup);
-  const env = prepareRoute(c.scratch, c.stateDir, { code: 6, out: { success: false, reason: 'source_unavailable', state: 'source_unavailable' } });
+  const env = prepareRoute(c.scratch, c.stateDir, { code: 6, out: { success: false, reason: 'source_unavailable', state: 'source_unavailable', mutationAttempted: false } });
   assertRefused(runStart(c, env), { code: 6, marker: c.marker, stateDir: c.stateDir });
   assert.equal(readRecord(c.scratch, c.stateDir).claim, null);
 });
 
-for (const [code, state] of [[2, 'not_found'], [3, 'not_ready'], [4, 'awaiting_merge'], [4, 'work_exists'], [5, 'readback_failed'], [7, 'mutation_failed']]) {
-  test(`R2: gate ${code} ${state} is returned as is; no executor`, (t) => {
+for (const [code, state] of [[2, 'not_found'], [3, 'not_ready'], [4, 'awaiting_merge'], [4, 'work_exists']]) {
+  test(`R2: gate ${code} ${state} that states "no mutation" is returned as is; no executor, the attempt is removed`, (t) => {
     const c = newCase();
     t.after(c.cleanup);
-    const env = prepareRoute(c.scratch, c.stateDir, { code, out: { success: false, reason: state, state } });
+    const env = prepareRoute(c.scratch, c.stateDir, { code, out: { success: false, reason: state, state, mutationAttempted: false } });
     assertRefused(runStart(c, env), { code, marker: c.marker, stateDir: c.stateDir });
+    assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null, 'a confirmed "no mutation" removes the attempt');
   });
 }
 
 // ---------------------------------------------------------------------------
 // R2 (fix round) — "captured but not started" is a separate state, not an ordinary refusal.
-// Everything below the claim leaves an orphanedClaim; labels are never put back by the route.
+// Everything below the claim leaves an unresolved claimAttempt; labels are never put back by the route.
 // ---------------------------------------------------------------------------
 const ISO_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 
-function orphanRecord(c) { return readRecord(c.scratch, c.stateDir).orphanedClaim; }
+function orphanRecord(c) { return readRecord(c.scratch, c.stateDir).claimAttempt; }
 
 /** The orphan is recorded, printed in the contract format, and nothing was started or put back. */
-function assertOrphaned(c, r, { code, state, mode = 'implement', reason }) {
+function assertOrphaned(c, r, { code, mode = 'implement', reason }) {
   assert.equal(r.status, code, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
   assert.ok(!fs.existsSync(c.marker), 'the executor must not have been started');
   assert.ok(!lockHeld(c.stateDir), 'the lock must be released');
   const o = orphanRecord(c);
-  assert.ok(o, 'orphanedClaim must be in the journal: ' + r.stderr);
-  assert.deepStrictEqual(Object.keys(o).sort(), ['code', 'createdAt', 'issueKey', 'mode', 'reason', 'state']);
+  assert.ok(o, 'claimAttempt must be in the journal: ' + r.stderr);
+  assert.deepStrictEqual(Object.keys(o).sort(), ['attemptId', 'code', 'createdAt', 'issueKey', 'mode', 'reason', 'stage']);
+  assert.equal(o.stage, 'unresolved');
+  assert.match(o.attemptId, /^[0-9a-f-]{36}$/);
   assert.equal(o.issueKey, 'KAN-14');
   assert.equal(o.mode, mode);
-  assert.equal(o.state, state);
   assert.equal(o.code, code);
   assert.match(o.createdAt, ISO_RE);
   assert.ok(Math.abs(Date.now() - Date.parse(o.createdAt)) < 60000);
@@ -706,13 +708,13 @@ function assertOrphaned(c, r, { code, state, mode = 'implement', reason }) {
 }
 
 for (const [state, mode] of [['claimed', 'review'], ['review_pending', 'implement'], ['closing', 'implement'], ['work_exists', null], ['unknown_state', 'implement']]) {
-  test(`R5/R2: gate 0 with ${state}/${mode} is not a permit → 5, no executor, an orphanedClaim`, (t) => {
+  test(`R5/R2: gate 0 with ${state}/${mode} is not a permit → 5, no executor, an unresolved claimAttempt`, (t) => {
     const c = newCase();
     t.after(c.cleanup);
     const env = prepareRoute(c.scratch, c.stateDir, { out: { success: true, state, reason: state, mode, pr: null } });
     const r = runStart(c, env);
-    // the orphan names the mode the gate answered with, or the candidate's when it answered none
-    assertOrphaned(c, r, { code: 5, state, mode: mode === null ? 'implement' : mode, reason: /unusable state\/mode/ });
+    // the attempt carries the CANDIDATE's mode, whatever the gate answered
+    assertOrphaned(c, r, { code: 5, mode: 'implement', reason: /unusable state\/mode/ });
     assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'nothing is accepted');
   });
 }
@@ -727,7 +729,7 @@ function assertRefusedBeforeClaim(c, r, code) {
   assert.equal(claimCalls(c.scratch).length, 0, 'the gate (the only label mutator) must not be called');
   const rec = readRecord(c.scratch, c.stateDir);
   assert.equal(rec.claim, null, 'no accepted result');
-  assert.equal(rec.orphanedClaim, null, 'nothing was captured, so no orphan');
+  assert.equal(rec.claimAttempt, null, 'nothing was attempted, so no claim attempt');
 }
 
 test('R1: the re-read comes BEFORE the claim — pickup, PR list, PR view, then the gate (one shared call log)', (t) => {
@@ -858,7 +860,7 @@ test('R2/R1 last line of defence: the live re-read agrees with the candidate but
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir, { out: REVIEW() }); // re-read: implement; gate: review
   const r = runStart(c, env);
-  assertOrphaned(c, r, { code: 18, state: 'review_pending', mode: 'review', reason: /mode changed/ });
+  assertOrphaned(c, r, { code: 18, mode: 'implement', reason: /mode changed/ });
   assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'the other mode is not accepted');
 });
 
@@ -868,7 +870,7 @@ test('R2/R1 last line of defence: the gate answers another PR head → 18 and an
   const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
   const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: REVIEW(42, SHA_B) });
   const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
-  assertOrphaned(c, r, { code: 18, state: 'review_pending', mode: 'review', reason: /head/ });
+  assertOrphaned(c, r, { code: 18, mode: 'review', reason: /head/ });
 });
 
 test('R2: a head that was compared is reported headComparable:true; an unknown candidate head is reported false, not passed off as compared', (t) => {
@@ -916,23 +918,23 @@ test('R2: the executor cannot be started (ENOENT) → 127 AND an orphan; the gat
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir);
   const r = runStart(c, env, { tail: ['definitely-not-a-real-binary-xyz'] });
-  assertOrphaned(c, r, { code: 127, state: 'claimed', reason: /could not be started/ });
+  assertOrphaned(c, r, { code: 127, reason: /could not be started/ });
 });
 
 // ---------------------------------------------------------------------------
-// R2 — while an orphanedClaim exists: precheck writes no candidate (14), start refuses before the claim (14)
+// R2 — while a claimAttempt exists: precheck writes no candidate (14), start refuses before the claim (14)
 // ---------------------------------------------------------------------------
-const ORPHAN = { issueKey: 'KAN-14', mode: 'implement', state: 'claimed', code: 5, reason: 'seeded by the test', createdAt: new Date().toISOString() };
+const ORPHAN = { attemptId: 'seeded-attempt', issueKey: 'KAN-14', mode: 'implement', stage: 'unresolved', code: 5, reason: 'seeded by the test', createdAt: new Date().toISOString() };
 
 test('R2: an unresolved orphan → precheck returns 14, writes no candidate, asks no source', (t) => {
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   const old = freshCandidate({ issueKey: 'KAN-1', createdAt: agoIso(60000) });
-  seedPatch(c.scratch, c.stateDir, { candidate: old, orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { candidate: old, claimAttempt: ORPHAN });
   const env = precheckEnv(c.scratch, {});
   const r = runCliEnv(PRECHECK_ARGS, c.stateDir, env);
   assert.equal(r.status, 14, r.stdout + r.stderr);
-  assert.match(r.stderr, /orphaned claim/);
+  assert.match(r.stderr, /claim attempt/);
   assert.deepStrictEqual(readRecord(c.scratch, c.stateDir).candidate, old, 'the candidate was not rewritten');
   assert.ok(!fs.existsSync(env.GH_LOG), 'no PR lookup');
 });
@@ -941,7 +943,7 @@ test('R2: an unresolved orphan → start returns 14 BEFORE the claim, even with 
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   const r = runStart(c, env);
   assertRefused(r, { code: 14, marker: c.marker, stateDir: c.stateDir });
   assert.equal(claimCalls(c.scratch).length, 0, 'the gate must not be called');
@@ -953,7 +955,7 @@ test('R2: an orphan of ANOTHER issue blocks the route just the same (the state o
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: { ...ORPHAN, issueKey: 'KAN-7' } });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: { ...ORPHAN, issueKey: 'KAN-7' } });
   assertRefused(runStart(c, env), { code: 14, marker: c.marker, stateDir: c.stateDir });
   assert.equal(runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {})).status, 14);
 });
@@ -962,7 +964,7 @@ test('R2: the lock is taken before the orphan is read — a held lock is still 9
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   holdLock(c.scratch, c.stateDir);
   assert.equal(runStart(c, env).status, 9);
 });
@@ -975,7 +977,7 @@ const CLEAR = (issue = 'KAN-14') => ['clear-orphan', '--issue', issue, '--confir
 test('R2: clear-orphan without --confirm or without --reason → 12, the record stays', (t) => {
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   for (const args of [
     ['clear-orphan', '--issue', 'KAN-14'],
     ['clear-orphan', '--issue', 'KAN-14', '--confirm'],
@@ -991,7 +993,7 @@ test('R2: clear-orphan without --confirm or without --reason → 12, the record 
 test('R2: clear-orphan --issue that does not match the record → 17, the record stays', (t) => {
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   const r = runCliEnv(CLEAR('KAN-15'), c.stateDir);
   assert.equal(r.status, 17, r.stdout + r.stderr);
   assert.deepStrictEqual(orphanRecord(c), ORPHAN);
@@ -1009,7 +1011,7 @@ test('R2: clear-orphan removes the record, writes nothing to Jira (no gate, no p
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   assertRefused(runStart(c, env), { code: 14, marker: c.marker, stateDir: c.stateDir });
   const r = runCliEnv(CLEAR(), c.stateDir, env);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -1022,32 +1024,32 @@ test('R2: clear-orphan removes the record, writes nothing to Jira (no gate, no p
   assert.ok(fs.existsSync(c.marker));
 });
 
-test('R2: status and recover show the orphanedClaim when there is one, and not when there is none', (t) => {
+test('R2: status and recover show the claimAttempt when there is one, and not when there is none', (t) => {
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   seedPatch(c.scratch, c.stateDir, { stage: 'running' });
-  assert.doesNotMatch(runCliEnv(['status'], c.stateDir).stdout, /orphanedClaim/);
-  assert.doesNotMatch(runCliEnv(['recover'], c.stateDir).stdout, /orphanedClaim/);
-  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  assert.doesNotMatch(runCliEnv(['status'], c.stateDir).stdout, /claimAttempt/);
+  assert.doesNotMatch(runCliEnv(['recover'], c.stateDir).stdout, /claimAttempt/);
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
   for (const cmd of ['status', 'recover']) {
     const out = runCliEnv([cmd], c.stateDir).stdout;
-    assert.match(out, /orphanedClaim: \{/, cmd);
+    assert.match(out, /claimAttempt: \{/, cmd);
     assert.match(out, /seeded by the test/, cmd);
   }
 });
 
-test('R2: a journal of the previous format (no orphanedClaim) is not damaged and reads as null', (t) => {
+test('R2: a journal of the previous format (no claimAttempt) is not damaged and reads as null', (t) => {
   const c = newCase('cli-orph-');
   t.after(c.cleanup);
   seedPatch(c.scratch, c.stateDir, { stage: 'running' });
   const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
   const rec = JSON.parse(fs.readFileSync(jf, 'utf8'));
-  delete rec.orphanedClaim; delete rec.claim; delete rec.candidate;
+  delete rec.claimAttempt; delete rec.claim; delete rec.candidate;
   const { checksum, ...body } = rec;
   const sorted = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v);
   rec.checksum = crypto.createHash('sha256').update(JSON.stringify(sorted(body))).digest('hex');
   fs.writeFileSync(jf, JSON.stringify(rec));
-  assert.equal(readRecord(c.scratch, c.stateDir).orphanedClaim, null);
+  assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null);
   assert.equal(runCliEnv(['status'], c.stateDir).status, 0);
 });
 
@@ -1223,5 +1225,474 @@ test('R5: every environment factory of these tests names a LOCAL credentials fil
     const creds = JSON.parse(fs.readFileSync(env.JIRA_CREDENTIALS_FILE, 'utf8'));
     assert.match(creds.site, /^http:\/\/127\.0\.0\.1:\d+$/, 'a local address');
     assert.equal(creds.token, 'test-token-not-real');
+  }
+});
+
+// ===========================================================================
+// Stage 6 — the claim attempt is recorded BEFORE the gate (contract: "Исполняемый маршрут запуска").
+//
+// What these tests prove, and what they do NOT:
+//  * "the gate was not called" is proved by the gate stub's own call log (CL_LOG), never by an exit code;
+//  * "no executor" is proved by the executor's marker file, which only the executor writes;
+//  * "what was on disk when the gate ran" is proved by the gate stub reading the journal itself;
+//  * a process that is killed is a real OS process killed with SIGKILL (on Windows: TerminateProcess).
+//    Delivery of a Windows console signal (Ctrl+C) to a child is not reachable from a test on this platform.
+// ===========================================================================
+const SECRETS = ['SENTINEL-JIRA-TOKEN-9f3a', 'SENTINEL-GH-TOKEN-71cc', 'test-token-not-real'];
+
+/** Env with secrets planted in the process environment (the route must never print or journal them). */
+function withSecrets(env) {
+  return { ...env, JIRA_API_TOKEN: SECRETS[0], GH_TOKEN: SECRETS[1] };
+}
+
+/** Everything the route wrote anywhere under the state dir, as one string. */
+function stateDump(stateDir) {
+  const parts = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) walk(f);
+      else parts.push(fs.readFileSync(f, 'utf8'));
+    }
+  };
+  if (fs.existsSync(stateDir)) walk(stateDir);
+  return parts.join('\n');
+}
+
+function assertNoSecrets(r, c, label) {
+  const all = (r.stdout || '') + (r.stderr || '') + stateDump(c.stateDir);
+  for (const sct of SECRETS) assert.ok(!all.includes(sct), `${label}: the secret ${sct.slice(0, 12)}… must not appear in stdout, stderr or the journal`);
+}
+
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * The follow-up run after a claim attempt that stayed behind: `precheck` and `start` both return 14,
+ * no candidate is written, no source is asked, the gate is not called and no executor starts.
+ * Proved by counters and by the absence of a process, not by the return code.
+ */
+function assertFollowUpRefused(c, env, label, { lockFree = true } = {}) {
+  const gateBefore = claimCalls(c.scratch).length;
+  const candidateBefore = JSON.stringify(readRecord(c.scratch, c.stateDir).candidate);
+  for (const f of [env.PK_LOG, env.GH_LOG]) fs.rmSync(f, { force: true });
+
+  const pre = runCliEnv(PRECHECK_ARGS, c.stateDir, withSecrets({ ...precheckEnv(c.scratch, {}), PK_LOG: env.PK_LOG }));
+  assert.equal(pre.status, 14, label + ' precheck: ' + pre.stderr);
+  assert.ok(!fs.existsSync(env.PK_LOG), label + ': precheck asked no pickup');
+  assert.ok(!fs.existsSync(env.GH_LOG), label + ': precheck asked no PR lookup');
+  assert.equal(JSON.stringify(readRecord(c.scratch, c.stateDir).candidate), candidateBefore, label + ': precheck wrote no candidate');
+  assertNoSecrets(pre, c, label + ' precheck');
+
+  if (lockFree) {
+    const st = runStart(c, withSecrets(env));
+    assert.equal(st.status, 14, label + ' start: ' + st.stdout + st.stderr);
+    assert.equal(claimCalls(c.scratch).length, gateBefore, label + ': the gate was not called again');
+    assert.ok(!fs.existsSync(env.PK_LOG), label + ': start refused before even the re-read');
+    assert.ok(!fs.existsSync(c.marker), label + ': no executor ran');
+    assert.ok(!lockHeld(c.stateDir), label + ': the lock is released');
+    assertNoSecrets(st, c, label + ' start');
+  }
+  assert.ok(runCliEnv(['status'], c.stateDir).stdout.includes('claimAttempt: {'), label + ': status shows the attempt');
+  assert.ok(runCliEnv(['recover'], c.stateDir).stdout.includes('claimAttempt: {'), label + ': recover shows the attempt');
+}
+
+/** The attempt as an unresolved record with the contract line printed. */
+function assertUnresolvedAttempt(c, r, code, label) {
+  assert.equal(r.status, code, label + `: exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.ok(!fs.existsSync(c.marker), label + ': no executor');
+  assert.ok(!lockHeld(c.stateDir), label + ': the lock is released');
+  const a = readRecord(c.scratch, c.stateDir).claimAttempt;
+  assert.ok(a, label + ': the attempt stays in the journal');
+  assert.equal(a.stage, 'unresolved');
+  assert.equal(a.code, code);
+  assert.equal(a.issueKey, 'KAN-14');
+  assert.equal(a.mode, 'implement');
+  assert.ok(r.stderr.split('\n').includes(`ORPHANED_CLAIM: KAN-14 implement code=${code} ${a.reason}`), label + ': the contract line is printed: ' + r.stderr);
+  assert.doesNotMatch(r.stderr, /ORPHANED_CLAIM_UNRECORDED/, label);
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+// R1 — the order: the attempt is on disk, readable, `pending`, BEFORE the gate runs
+// ---------------------------------------------------------------------------
+test('S6/R1: when the gate runs, the journal already holds a pending claimAttempt with its own id, key, candidate mode and creation time', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const peek = path.join(c.scratch, 'peek.log');
+  const journalFile = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_PEEK_JOURNAL: journalFile, CL_PEEK_OUT: peek } });
+  const probe = writeProbeChild(c.scratch, c.marker, journalFile);
+  const r = runStart(c, env, { tail: [process.execPath, probe] });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+
+  const seen = fs.readFileSync(peek, 'utf8').split('\n').filter(Boolean);
+  assert.equal(seen.length, 1, 'the gate ran once');
+  const atGate = JSON.parse(seen[0]).claimAttempt;
+  assert.ok(atGate, 'the attempt was on disk when the gate was called');
+  assert.deepStrictEqual(Object.keys(atGate).sort(), ['attemptId', 'createdAt', 'issueKey', 'mode', 'stage']);
+  assert.equal(atGate.stage, 'pending');
+  assert.equal(atGate.issueKey, 'KAN-14');
+  assert.equal(atGate.mode, 'implement');
+  assert.match(atGate.attemptId, /^[0-9a-f-]{36}$/);
+  assert.match(atGate.createdAt, ISO_RE);
+  // The gate did not see an accepted result yet: the order is attempt -> gate -> accepted result.
+  assert.equal(JSON.parse(seen[0]).claim, null);
+  assert.ok(JSON.parse(fs.readFileSync(c.marker, 'utf8')).journalClaim, 'premise: the accepted result was saved before the executor');
+});
+
+test('S6/R1: during the executor the attempt is accepted (same id, same creation time); after the executor it is gone', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const peek = path.join(c.scratch, 'peek.log');
+  const journalFile = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_PEEK_JOURNAL: journalFile, CL_PEEK_OUT: peek } });
+  const probeScript = path.join(c.scratch, 'attempt-probe.mjs');
+  fs.writeFileSync(probeScript, [
+    "import fs from 'node:fs';",
+    `const j = JSON.parse(fs.readFileSync(${JSON.stringify(journalFile)}, 'utf8'));`,
+    `fs.writeFileSync(${JSON.stringify(c.marker)}, JSON.stringify(j.claimAttempt));`,
+    'process.exit(3);',
+  ].join('\n'));
+  const r = runStart(c, env, { tail: [process.execPath, probeScript] });
+  assert.equal(r.status, 3, 'the executor code is the route code: ' + r.stderr);
+  const during = JSON.parse(fs.readFileSync(c.marker, 'utf8'));
+  const atGate = JSON.parse(fs.readFileSync(peek, 'utf8').split('\n').filter(Boolean)[0]).claimAttempt;
+  assert.equal(during.stage, 'accepted');
+  assert.equal(during.attemptId, atGate.attemptId);
+  assert.equal(during.createdAt, atGate.createdAt, 'the creation time is immutable across stages');
+  assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null,
+    'the executor has actually finished (even with a non-zero code): the attempt is removed');
+  assert.equal(r.stderr.includes('ORPHANED_CLAIM'), false);
+});
+
+test('S6/R1: two runs get different attempt ids', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const peek = path.join(c.scratch, 'peek.log');
+  const journalFile = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  for (let i = 0; i < 2; i++) {
+    const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_PEEK_JOURNAL: journalFile, CL_PEEK_OUT: peek } });
+    assert.equal(runStart(c, env).status, 0);
+  }
+  const ids = fs.readFileSync(peek, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).claimAttempt.attemptId);
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1]);
+});
+
+// ---------------------------------------------------------------------------
+// R1 — removal only on a confirmed outcome
+// ---------------------------------------------------------------------------
+test('S6/R1: a gate that states mutationAttempted:false and refuses → the attempt is removed, the gate code is returned', (t) => {
+  for (const code of [2, 3, 4, 6]) {
+    const c = newCase('cli-s6-');
+    try {
+      const env = prepareRoute(c.scratch, c.stateDir, { code, out: { success: false, reason: 'x', state: 'x', mutationAttempted: false } });
+      const r = runStart(c, env);
+      assertRefused(r, { code, marker: c.marker, stateDir: c.stateDir });
+      assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null, 'code ' + code + ': removed');
+      assert.doesNotMatch(r.stderr, /ORPHANED_CLAIM/);
+      assert.equal(claimCalls(c.scratch).length, 1);
+      // and the route is free again: nothing blocks the next run
+      assert.equal(runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {})).status, 0);
+    } finally { c.cleanup(); }
+  }
+});
+
+const UNCONFIRMED = [
+  ['no statement at all', JSON.stringify({ success: false, reason: 'not_ready', state: 'not_ready' })],
+  ['mutationAttempted:true', JSON.stringify({ success: false, reason: 'not_ready', mutationAttempted: true })],
+  ['mutationAttempted as the string "false"', JSON.stringify({ success: false, reason: 'x', mutationAttempted: 'false' })],
+  ['mutationAttempted:null', JSON.stringify({ success: false, reason: 'x', mutationAttempted: null })],
+  ['mutationAttempted:0', JSON.stringify({ success: false, reason: 'x', mutationAttempted: 0 })],
+  ['an unparsable answer', 'this is not json'],
+  ['a cut-off answer', '{"success":false,"reason":"mutation_fai'],
+  ['an empty answer', ''],
+  ['a JSON list instead of an object', '[{"mutationAttempted":false}]'],
+];
+for (const [name, raw] of UNCONFIRMED) {
+  test(`S6/R1: gate code 3 with ${name} → the attempt is NOT removed: unresolved, ORPHANED_CLAIM printed`, (t) => {
+    const c = newCase('cli-s6-');
+    t.after(c.cleanup);
+    const env = prepareRoute(c.scratch, c.stateDir, { code: 3, extra: { CL_OUT: raw } });
+    const r = runStart(c, env);
+    assertUnresolvedAttempt(c, r, 3, name);
+    assert.equal(claimCalls(c.scratch).length, 1, 'the route never calls the gate again to undo anything');
+  });
+}
+
+test('S6/R1: a gate that dies without an answer (killed) → the attempt is unresolved, code 1', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_SELF_KILL: '1' } });
+  const r = runStart(c, env);
+  assertUnresolvedAttempt(c, r, 1, 'killed gate');
+  assert.equal(readRecord(c.scratch, c.stateDir).claim, null);
+});
+
+// ---------------------------------------------------------------------------
+// R1 — the attempt has no expiry and does not depend on the labels
+// ---------------------------------------------------------------------------
+for (const stage of ['pending', 'accepted', 'unresolved']) {
+  test(`S6/R1: a ${stage} attempt blocks precheck and start with 14 in every stage, however old, whatever the labels say`, (t) => {
+    const c = newCase('cli-s6-');
+    t.after(c.cleanup);
+    const env = prepareRoute(c.scratch, c.stateDir, {
+      live: {}, extra: {},
+    });
+    // far older than any 5-minute term; the pickup now says "nothing ready" (ai-ready is gone: the claim removed it)
+    const attempt = { attemptId: 'old-' + stage, issueKey: 'KAN-14', mode: 'implement', stage, createdAt: agoIso(400 * 24 * 3600 * 1000) };
+    seedPatch(c.scratch, c.stateDir, { claimAttempt: stage === 'unresolved' ? { ...attempt, code: 5, reason: 'seeded' } : attempt });
+    env.PK_CODE = '3';
+    env.PK_OUT = '{"work":false,"reason":"none","issue":null}';
+    assertFollowUpRefused(c, env, stage);
+    const a = readRecord(c.scratch, c.stateDir).claimAttempt;
+    assert.equal(a.stage, stage, 'nothing changed the attempt');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// R3 — the four scenarios, each with the follow-up run
+// ---------------------------------------------------------------------------
+for (const [num, code, reason] of [[1, 5, 'readback_failed'], [2, 7, 'mutation_failed']]) {
+  test(`S6/R3.${num}: the labels were changed, then the gate answered ${code} → unresolved, ORPHANED_CLAIM, no executor; the follow-up is refused`, (t) => {
+    const c = newCase('cli-s6-');
+    t.after(c.cleanup);
+    const mark = path.join(c.scratch, 'labels-changed');
+    const env = prepareRoute(c.scratch, c.stateDir, {
+      code, out: { success: false, reason, state: reason, mutationAttempted: true }, extra: { CL_MUTATE_MARK: mark },
+    });
+    const r = runStart(c, withSecrets(env));
+    assert.ok(fs.existsSync(mark), 'premise: the gate changed the labels');
+    assert.equal(claimCalls(c.scratch).length, 1);
+    assertUnresolvedAttempt(c, r, code, `R3.${num}`);
+    assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'no accepted result');
+    assertNoSecrets(r, c, `R3.${num}`);
+    assertFollowUpRefused(c, env, `R3.${num}`);
+    assert.equal(fs.readFileSync(mark, 'utf8').split('\n').filter(Boolean).length, 1, 'the labels were never touched again');
+  });
+}
+
+test('S6/R3.3: the route is killed after the gate reported the label change → the attempt survives, the next run sees it; nothing is left running', async (t) => {
+  const c = newCase('cli-s6-');
+  const hang = path.join(c.scratch, 'gate-pid');
+  const mark = path.join(c.scratch, 'labels-changed');
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_MUTATE_MARK: mark, CL_HANG_FILE: hang, CL_HANG_MS: '20000' } });
+  const route = spawn(process.execPath, [CLI, 'start', ...ROUTE_FLAGS(), '--', process.execPath, c.child], {
+    cwd: REPO_ROOT, stdio: 'ignore', env: { ...process.env, ...env, COORDINATOR_STATE_DIR: c.stateDir },
+  });
+  const routeExit = new Promise((resolve) => route.on('exit', resolve));
+  let gatePid = null;
+  t.after(() => {
+    // bounded cleanup in every outcome: the route, the gate stub, the case directories
+    for (const pid of [route.pid, gatePid]) { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } }
+    c.cleanup();
+  });
+  assert.ok(await waitForFile(hang, 15000), 'the gate stub must be reached');
+  gatePid = Number(fs.readFileSync(hang, 'utf8'));
+  assert.ok(fs.existsSync(mark), 'premise: the gate has reported the label change');
+
+  route.kill('SIGKILL');
+  const outcome = await Promise.race([routeExit, new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 15000))]);
+  assert.notEqual(outcome, 'TIMEOUT', 'the killed route must exit');
+  try { process.kill(gatePid, 'SIGKILL'); } catch { /* gone */ }
+  const deadline = Date.now() + 10000;
+  while ((isAlive(route.pid) || isAlive(gatePid)) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(!isAlive(route.pid) && !isAlive(gatePid), 'no route or gate process is left');
+  assert.ok(!fs.existsSync(c.marker), 'no executor ever ran');
+
+  const a = readRecord(c.scratch, c.stateDir).claimAttempt;
+  assert.ok(a, 'the attempt survived the kill');
+  assert.equal(a.stage, 'pending', 'the outcome of the gate is unknown, and says so');
+  assert.equal(a.issueKey, 'KAN-14');
+  assert.ok(lockHeld(c.stateDir), 'the dead route left its lock: only a human releases it');
+
+  // Next run, part 1: precheck (needs no lock) is refused and writes nothing.
+  assertFollowUpRefused(c, env, 'R3.3', { lockFree: false });
+  // Next run, part 2: start meets the dead owner's lock → 9, and still starts nothing.
+  const gateBefore = claimCalls(c.scratch).length;
+  assert.equal(runStart(c, env).status, 9);
+  // a human proves the owner dead and releases it; the attempt is still there and still refuses
+  const fr = runCliEnv(['force-release', '--confirm', '--reason', 'route killed in the test'], c.stateDir);
+  assert.equal(fr.status, 0, fr.stdout + fr.stderr);
+  assertFollowUpRefused(c, env, 'R3.3 after force-release');
+  assert.equal(claimCalls(c.scratch).length, gateBefore, 'the gate has never been called again');
+});
+
+test('S6/R3.4: the attempt cannot be saved → 5, the gate counter is 0, no executor, the labels were never touched', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const mark = path.join(c.scratch, 'labels-changed');
+  const env = prepareRoute(c.scratch, c.stateDir, { extra: { CL_MUTATE_MARK: mark } });
+  // journal.bak.json as a directory: the first write after the seed cannot back the previous record up, so it throws
+  fs.mkdirSync(path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.bak.json'));
+  const r = runStart(c, withSecrets(env));
+  assertRefused(r, { code: 5, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(claimCalls(c.scratch).length, 0, 'the gate was NOT called (counter of the stub, not the exit code)');
+  assert.ok(!fs.existsSync(mark), 'the labels were never touched');
+  assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null, 'nothing on disk: either the attempt is there or there was no mutation');
+  assert.match(r.stderr, /claim attempt could not be recorded/);
+  assertNoSecrets(r, c, 'R3.4');
+  // Honest limit: with nothing recorded there is nothing for a follow-up to refuse; a retry is allowed.
+  // (The case "written but read back differently" leaves an attempt and IS refused: see cli.test.js.)
+  fs.rmSync(path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.bak.json'), { recursive: true });
+  assert.equal(runStart(c, env).status, 0);
+});
+
+// ---------------------------------------------------------------------------
+// R1 — printing and recording of the unresolved transition
+// ---------------------------------------------------------------------------
+test('S6/R1: unresolved is printed even when the journal write fails, with ORPHANED_CLAIM_UNRECORDED (unreadable journal after the gate)', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, {
+    code: 5, out: { success: false, reason: 'readback_failed', mutationAttempted: true },
+  });
+  env.CL_SABOTAGE_JOURNAL = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  const r = runStart(c, withSecrets(env));
+  assertRefused(r, { code: 5, marker: c.marker, stateDir: c.stateDir });
+  const lines = r.stderr.split('\n');
+  assert.ok(lines.some((l) => /^ORPHANED_CLAIM: KAN-14 implement code=5 /.test(l)), r.stderr);
+  assert.ok(lines.includes('ORPHANED_CLAIM_UNRECORDED'), r.stderr);
+  assertNoSecrets(r, c, 'unrecorded');
+});
+
+// ---------------------------------------------------------------------------
+// R2 — "no record" and "journal not read" are different answers
+// ---------------------------------------------------------------------------
+const UNREADABLE_JOURNALS = [
+  ['not JSON', (jf) => fs.writeFileSync(jf, '{ this is not json')],
+  ['a checksum that does not match', (jf) => {
+    const rec = JSON.parse(fs.readFileSync(jf, 'utf8'));
+    rec.issueKey = 'KAN-TAMPERED';
+    fs.writeFileSync(jf, JSON.stringify(rec));
+  }],
+  ['a journal path that cannot be read as a file', (jf) => { fs.rmSync(jf, { force: true }); fs.mkdirSync(jf); }],
+];
+
+for (const [name, damage] of UNREADABLE_JOURNALS) {
+  test(`S6/R2: ${name} → clear-orphan is a diagnostic refusal (10), clears nothing, reports no success`, (t) => {
+    const c = newCase('cli-s6-');
+    t.after(c.cleanup);
+    seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
+    const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+    damage(jf);
+    const before = fs.statSync(jf).isDirectory() ? 'DIR' : fs.readFileSync(jf, 'utf8');
+    const r = runCliEnv(CLEAR(), c.stateDir, withSecrets({}));
+    assert.equal(r.status, 10, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /NO_ORPHANED_CLAIM|ORPHAN_CLEARED/, 'no success, no "there is nothing"');
+    assert.match(r.stderr, /CLEAR_ORPHAN_REFUSED/);
+    assert.equal(fs.statSync(jf).isDirectory() ? 'DIR' : fs.readFileSync(jf, 'utf8'), before, 'the journal was not touched');
+    assertNoSecrets(r, c, 'clear-orphan');
+  });
+
+  test(`S6/R2: ${name} → precheck and start refuse with 10 (not 0, not 15), and call nothing`, (t) => {
+    const c = newCase('cli-s6-');
+    t.after(c.cleanup);
+    const env = prepareRoute(c.scratch, c.stateDir);
+    const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+    damage(jf);
+    for (const f of [env.PK_LOG, env.GH_LOG]) fs.rmSync(f, { force: true });
+    const pre = runCliEnv(PRECHECK_ARGS, c.stateDir, withSecrets({ ...precheckEnv(c.scratch, {}), PK_LOG: env.PK_LOG }));
+    assert.equal(pre.status, 10, pre.stdout + pre.stderr);
+    assert.ok(!fs.existsSync(env.PK_LOG) && !fs.existsSync(env.GH_LOG), 'precheck asked no source');
+    const st = runStart(c, withSecrets(env));
+    assertRefused(st, { code: 10, marker: c.marker, stateDir: c.stateDir });
+    assert.equal(claimCalls(c.scratch).length, 0, 'the gate was not called');
+    assert.ok(!fs.existsSync(env.PK_LOG), 'not even the re-read ran');
+    assertNoSecrets(pre, c, 'precheck 10');
+    assertNoSecrets(st, c, 'start 10');
+  });
+}
+
+test('S6/R2: a journal that does not exist yet is "no record": clear-orphan is 0 with NO_ORPHANED_CLAIM and precheck proceeds', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const r = runCliEnv(CLEAR(), c.stateDir);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /NO_ORPHANED_CLAIM/);
+  assert.equal(runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {})).status, 0);
+});
+
+test('S6/R2: clear-orphan removes an attempt in any stage and writes nothing to Jira', (t) => {
+  for (const stage of ['pending', 'accepted', 'unresolved']) {
+    const c = newCase('cli-s6-');
+    try {
+      const env = prepareRoute(c.scratch, c.stateDir);
+      seedPatch(c.scratch, c.stateDir, { claimAttempt: { ...ORPHAN, stage } });
+      const r = runCliEnv(CLEAR(), c.stateDir, withSecrets(env));
+      assert.equal(r.status, 0, stage + r.stdout + r.stderr);
+      assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null);
+      assert.equal(claimCalls(c.scratch).length, 0, 'no gate');
+      assert.ok(!fs.existsSync(env.PK_LOG) && !fs.existsSync(env.GH_LOG), 'no source');
+      assertNoSecrets(r, c, 'clear-orphan ' + stage);
+    } finally { c.cleanup(); }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R5 — secrets on the refusals of this stage; isolation of the new failure path
+// ---------------------------------------------------------------------------
+test('S6/R5: the refusals 14 and 10 print no secret (planted in the environment and in the credentials file)', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  seedPatch(c.scratch, c.stateDir, { claimAttempt: ORPHAN });
+  const r14 = runStart(c, withSecrets(env));
+  assert.equal(r14.status, 14);
+  assertNoSecrets(r14, c, '14');
+});
+
+test('S6/R5: only the claim gate is real: it reaches the local listener alone, with test credentials; its "no mutation" answer removes the attempt', async (t) => {
+  const c = newCase('cli-s6-');
+  const emptyHome = mkTmp('cli-s6-home-');
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ url: req.url, host: req.headers.host, method: req.method });
+    req.resume();
+    res.statusCode = 500;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); c.cleanup(); rmTmp(emptyHome); });
+  const { port } = server.address();
+  const credsFile = path.join(c.scratch, 'local-creds.json');
+  fs.writeFileSync(credsFile, JSON.stringify({ site: `http://127.0.0.1:${port}`, email: 'test@example.com', token: 'test-token-not-real' }));
+
+  const env = prepareRoute(c.scratch, c.stateDir);
+  delete env.PRECHECK_CLAIM_SCRIPT; // deliberately: the real claim.js
+  const child = spawn(process.execPath, [CLI, 'start', ...ROUTE_FLAGS(), '--', process.execPath, c.child], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...withSecrets(env), JIRA_CREDENTIALS_FILE: credsFile, COORDINATOR_STATE_DIR: c.stateDir, HOME: emptyHome, USERPROFILE: emptyHome },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = ''; let stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+
+  assert.equal(code, 6, 'the issue source answered 500: ' + stdout + stderr);
+  assert.ok(requests.length > 0, 'premise: the real claim.js ran against the credentials it was given');
+  for (const rq of requests) {
+    assert.equal(rq.host, `127.0.0.1:${port}`, 'every request goes to the local address');
+    assert.equal(rq.method, 'GET', 'and none of them is a write');
+  }
+  assert.ok(!fs.existsSync(c.marker), 'no executor');
+  assert.equal(readRecord(c.scratch, c.stateDir).claimAttempt, null, 'the real gate said "no mutation": the attempt is removed');
+  const all = stdout + stderr + stateDump(c.stateDir);
+  for (const sct of SECRETS) assert.ok(!all.includes(sct), 'no secret in stdout, stderr or the journal');
+});
+
+test('S6/R5: the credentials file stays named in every environment factory (also the new ones)', (t) => {
+  const c = newCase('cli-s6-');
+  t.after(c.cleanup);
+  for (const env of [
+    claimEnv(c.scratch, { extra: { CL_SELF_KILL: '1' } }),
+    prepareRoute(c.scratch, c.stateDir, { code: 5, out: {} }),
+    withSecrets(precheckEnv(c.scratch, {})),
+  ]) {
+    assert.ok(env.JIRA_CREDENTIALS_FILE);
+    assert.match(JSON.parse(fs.readFileSync(env.JIRA_CREDENTIALS_FILE, 'utf8')).site, /^http:\/\/127\.0\.0\.1:\d+$/);
   }
 });
