@@ -112,6 +112,15 @@ const MUTATION = [
   ['transition fails with 500 after the labels changed (7)', { postCode: 500 }, [...BASE, '--transition-id', '5', '--expect-status', 'In Review'], 7],
 ];
 
+// The same on the --adopt-existing path (an open PR, no verdict yet: the labels move to ai-in-review).
+// This path has its own label request; the bench showed that without these rows its flag was not covered.
+const ADOPT = [...BASE, '--adopt-existing'];
+MUTATION.push(
+  ['adopt path: labels PUT refused with 401 (6)', { prs: [OPEN_PR], putCode: 401 }, ADOPT, 6],
+  ['adopt path: labels PUT fails with 500 (7)', { prs: [OPEN_PR], putCode: 500 }, ADOPT, 7],
+  ['adopt path: labels PUT accepted but the read-back shows no change (5)', { prs: [OPEN_PR], putApplies: false }, ADOPT, 5],
+);
+
 for (const [name, cfg, args, code] of MUTATION) {
   test(`claim.js states mutationAttempted:true once a change was attempted — ${name}`, async () => {
     const res = await run(cfg, args);
