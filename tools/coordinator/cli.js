@@ -186,7 +186,7 @@ async function main({ argv, cwd, env } = {}) {
   const repoKey = resolveRepoKey({ cwd });
   if (repoKey === null) {
     process.stderr.write('NOT_A_GIT_REPO\n');
-    return 14;
+    return 1; // 14 is the code of an unresolved orphaned claim
   }
 
   switch (command) {
@@ -233,6 +233,7 @@ async function main({ argv, cwd, env } = {}) {
       if (jr.record) {
         console.log('stage:', jr.record.stage);
         console.log('updatedAt:', jr.record.updatedAt);
+        if (jr.record.orphanedClaim) console.log('orphanedClaim:', JSON.stringify(jr.record.orphanedClaim));
       }
 
       return lockLocked ? 9 : 0;
@@ -305,6 +306,7 @@ async function main({ argv, cwd, env } = {}) {
         if (rec.taskId !== undefined) console.log('taskId:', rec.taskId);
         if (rec.dispatchIds !== undefined) console.log('dispatchIds:', JSON.stringify(rec.dispatchIds));
         if (rec.prUrl !== undefined) console.log('prUrl:', rec.prUrl);
+        if (rec.orphanedClaim) console.log('orphanedClaim:', JSON.stringify(rec.orphanedClaim));
       } else if (jr.reason) {
         console.log('journal:', jr.reason);
       }
@@ -321,8 +323,43 @@ async function main({ argv, cwd, env } = {}) {
       return verdict === 'UNCERTAIN' ? 13 : 0;
     }
 
+    case 'clear-orphan': {
+      const { flags, reason } = parseOptions(args);
+      const oi = args.indexOf('--issue');
+      const issueArg = oi !== -1 && oi + 1 < args.length ? args[oi + 1] : null;
+      if (!flags.has('--confirm') || !reason || reason.length === 0) {
+        console.log('CONFIRMATION_REQUIRED');
+        return 12;
+      }
+      if (!issueArg) {
+        process.stderr.write('Usage: cli.js clear-orphan --issue <KEY> --confirm --reason "<text>"\n');
+        return 2;
+      }
+      const cur = orphanOf(stateDir, repoKey);
+      if (!cur) {
+        console.log('NO_ORPHANED_CLAIM');
+        return 0;
+      }
+      if (cur.issueKey !== issueArg) {
+        console.log('ORPHAN_ISSUE_MISMATCH: the record is for ' + cur.issueKey);
+        return 17;
+      }
+      // Only the journal changes. Nothing is written to Jira: "cleared" means "a human looked and decided".
+      let cleared = false;
+      try {
+        write({ stateDir, repoKey, patch: { orphanedClaim: null } });
+        cleared = orphanOf(stateDir, repoKey) === null;
+      } catch { cleared = false; }
+      if (!cleared) {
+        process.stderr.write('CLEAR_ORPHAN_FAILED: the journal could not be updated\n');
+        return 1;
+      }
+      console.log('ORPHAN_CLEARED: ' + cur.issueKey + ' reason=' + reason.replace(/\s+/g, ' ').trim());
+      return 0;
+    }
+
     default: {
-      process.stderr.write('Usage: cli.js start|precheck|status|release|force-release|recover\n');
+      process.stderr.write('Usage: cli.js start|precheck|status|release|force-release|recover|clear-orphan\n');
       return 2;
     }
   }
@@ -363,6 +400,31 @@ function sortDeep(v) {
   return v;
 }
 
+/** Pickup arguments shared by `precheck` and the live re-read in `start`: the same source, the same flags. */
+function pickupArgv(project, repo, opt) {
+  const argv = ['--project', project, '--repo', repo, '--json'];
+  for (const f of ['--project-label', '--ci-grace-minutes', '--base-branch']) {
+    const v = opt(f);
+    if (v !== null) argv.push(f, v);
+  }
+  return argv;
+}
+
+function pickupScriptOf(env) {
+  const toolsJira = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'jira');
+  return env.PRECHECK_PICKUP_SCRIPT || path.join(toolsJira, 'pickup.js');
+}
+
+/** The orphaned-claim record of the journal, or null (also when the journal cannot be read). */
+function orphanOf(stateDir, repoKey) {
+  const jr = readJournal({ stateDir, repoKey });
+  return jr.ok && jr.record.orphanedClaim && typeof jr.record.orphanedClaim === 'object' ? jr.record.orphanedClaim : null;
+}
+
+function orphanSummary(o) {
+  return `${o.issueKey} ${o.mode} code=${o.code} ${o.reason}`;
+}
+
 /**
  * precheck: is there work worth taking right now? It does NOT claim anything and changes no labels
  * anywhere: only pickup.js (read-only) and a read-only PR lookup run. Its result is a CANDIDATE
@@ -376,15 +438,15 @@ async function precheck({ args, stateDir, repoKey, cwd, env }) {
     process.stderr.write('Usage: cli.js precheck --project K --repo o/n [--project-label pl] [--ci-grace-minutes N] [--base-branch b]\n');
     return 2;
   }
-  const toolsJira = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'jira');
-  const pickupScript = env.PRECHECK_PICKUP_SCRIPT || path.join(toolsJira, 'pickup.js');
-
-  const pickupArgs = ['--project', project, '--repo', repo, '--json'];
-  for (const f of ['--project-label', '--ci-grace-minutes', '--base-branch']) {
-    const v = opt(f);
-    if (v !== null) pickupArgs.push(f, v);
+  // An unresolved orphaned claim: the state of the repository is undefined, so no candidate is written
+  // and nothing else is picked up. Checked before any source is asked.
+  const orphan = orphanOf(stateDir, repoKey);
+  if (orphan) {
+    process.stderr.write('PRECHECK_REFUSED: an orphaned claim is not cleared: ' + orphanSummary(orphan) + '\n');
+    return 14;
   }
-  const pk = runNodeScript({ script: pickupScript, argv: pickupArgs, cwd, env });
+
+  const pk = runNodeScript({ script: pickupScriptOf(env), argv: pickupArgv(project, repo, opt), cwd, env });
   if (pk.code === null || pk.code === 1) {
     process.stderr.write('PRECHECK: pickup did not run to completion\n');
     return 1;
@@ -445,8 +507,54 @@ function releaseQuietly(stateDir, repoKey, token) {
 }
 
 /**
- * start: lock, candidate, age, issue/mode, claim, state/mode, live comparison, save, age, spawn.
- * The order is the contract. Any refusal in steps 2-9 spawns nothing and releases the lock.
+ * Live data against the candidate: mode, linked PR, PR head. Returns the name of the discrepancy, or null.
+ * A different mode is never a silent switch.
+ * @param {{ mode: string|null, pr: null | { number: any, headSha: any } }} live
+ */
+function liveDiscrepancy(candidate, live) {
+  if (live.mode !== candidate.mode) {
+    return 'mode changed since precheck: candidate ' + JSON.stringify(candidate.mode) + ', now ' + JSON.stringify(live.mode);
+  }
+  const candPr = candidate.pr && typeof candidate.pr === 'object' ? candidate.pr : null;
+  if (candPr === null && live.pr !== null) {
+    return 'a PR appeared since precheck: #' + live.pr.number;
+  }
+  if (candPr !== null && (live.pr === null || live.pr.number !== candPr.number)) {
+    return 'the linked PR changed since precheck: candidate #' + candPr.number
+      + ', now ' + (live.pr === null ? 'none' : '#' + live.pr.number);
+  }
+  const candHead = candPr && typeof candPr.headSha === 'string' && candPr.headSha ? candPr.headSha : null;
+  if (candHead !== null && candHead !== (live.pr ? live.pr.headSha : null)) {
+    return 'the PR head changed since precheck: candidate ' + candHead + ', now ' + JSON.stringify(live.pr ? live.pr.headSha : null);
+  }
+  return null;
+}
+
+/**
+ * "Captured but not started": the labels have already been changed and the executor will not run.
+ * The labels are NEVER put back by the route (a human may have set ai-blocked in between). The fact is
+ * written to the journal and ALWAYS printed; if the write failed, ORPHANED_CLAIM_UNRECORDED follows.
+ * @returns {number} the code to exit with
+ */
+function recordOrphan({ stateDir, repoKey, issueKey, mode, state, code, reason }) {
+  const line = String(reason).replace(/\s+/g, ' ').trim();
+  const orphan = { issueKey, mode, state, code, reason: line, createdAt: new Date().toISOString() };
+  let recorded = false;
+  try {
+    write({ stateDir, repoKey, patch: { orphanedClaim: orphan } });
+    const back = readJournal({ stateDir, repoKey });
+    recorded = back.ok && JSON.stringify(sortDeep(back.record.orphanedClaim)) === JSON.stringify(sortDeep(orphan));
+  } catch { recorded = false; }
+  process.stderr.write(`ORPHANED_CLAIM: ${issueKey} ${mode} code=${code} ${line}\n`);
+  if (!recorded) process.stderr.write('ORPHANED_CLAIM_UNRECORDED\n');
+  return code;
+}
+
+/**
+ * start: lock, signal handlers, candidate, orphan, age, issue/mode, live read-only re-read, claim,
+ * state/mode, save, age, spawn. The order is the contract.
+ * A refusal before the claim spawns nothing, releases the lock and leaves no trace in Jira.
+ * A refusal after the claim leaves "captured but not started" (see recordOrphan).
  */
 async function start({ args, stateDir, repoKey, cwd, env }) {
   const sep = args.indexOf('--');
@@ -482,26 +590,110 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
   }
   const { token } = acq;
 
+  // 2. Signal handlers right after the lock, not after the spawn: between the lock and the spawn lie
+  // synchronous gate calls, and a signal in that window must not kill the process past the release.
+  // Before the spawn a signal means "no executor": the route stops at the next checkpoint. After the
+  // spawn it is forwarded to the child and the lock stays until the child has actually gone.
+  let stopSignal = null;
+  let child = null;
+  let childGone = false;
+  const forward = (sig) => {
+    stopSignal = sig;
+    if (child !== null && !childGone) {
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+    }
+  };
+  const onSigint = () => forward('SIGINT');
+  const onSigterm = () => forward('SIGTERM');
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
+  const stopped = () => stopSignal !== null;
+  const stopCode = () => 128 + (signalToNumber(stopSignal) || 0);
+
+  let heartbeatTimer = null;
+  // Set at step 7: from here on a refusal is "captured but not started".
+  let captured = null;
+  const orphan = (code, reason) => recordOrphan({
+    stateDir, repoKey, issueKey: captured.issueKey, mode: captured.mode, state: captured.state, code, reason,
+  });
+
   try {
-    // 2. The candidate must be an object.
+    // 3. The candidate must be an object.
     const jr = readJournal({ stateDir, repoKey });
+    // A not-yet-cleared orphaned claim refuses the start BEFORE anything else, in particular before the claim.
+    const pending = jr.ok && jr.record.orphanedClaim && typeof jr.record.orphanedClaim === 'object' ? jr.record.orphanedClaim : null;
+    if (pending) {
+      process.stderr.write('START_REFUSED: an orphaned claim is not cleared: ' + orphanSummary(pending) + '\n');
+      return 14;
+    }
     const candidate = jr.ok ? jr.record.candidate : null;
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
       process.stderr.write('START_REFUSED: no candidate in the journal' + (jr.ok ? '' : ' (journal ' + jr.reason + ')') + '\n');
       return 15;
     }
-    // 3. Age from the candidate's own createdAt.
+    // 4. Age from the candidate's own createdAt.
     if (!recordFresh(candidate)) {
       process.stderr.write('START_REFUSED: the candidate is expired or has no valid createdAt\n');
       return 16;
     }
-    // 4. --issue and --mode against the candidate.
+    // 5. --issue and --mode against the candidate.
     if (candidate.issueKey !== issue || candidate.mode !== mode) {
       process.stderr.write('START_REFUSED: --issue/--mode ' + JSON.stringify([issue, mode])
         + ' differ from the candidate ' + JSON.stringify([candidate.issueKey ?? null, candidate.mode ?? null]) + '\n');
       return 17;
     }
-    // 5. The claim: the only place where labels change.
+    if (stopped()) {
+      process.stderr.write('START_REFUSED: stopped by ' + stopSignal + ' before the claim\n');
+      return stopCode();
+    }
+
+    // 6. Live data, READ-ONLY, before the claim: the same pickup source and the same PR lookup as precheck.
+    // Not a single mutation happens here, so a discrepancy leaves no trace in Jira.
+    const pk = runNodeScript({ script: pickupScriptOf(env), argv: pickupArgv(project, repo, opt), cwd, env });
+    if (pk.code === null || pk.code === 1) {
+      process.stderr.write('START_REFUSED: the live pickup did not run to completion\n');
+      return 1;
+    }
+    if (pk.code !== 0) {
+      process.stdout.write(pk.stdout);
+      process.stderr.write('START_REFUSED: the live pickup returned ' + pk.code + '\n');
+      return pk.code;
+    }
+    const picked = parseJsonOutput(pk.stdout);
+    const pickedKey = picked && picked.issue && typeof picked.issue.key === 'string' ? picked.issue.key : null;
+    if (pickedKey !== candidate.issueKey) {
+      // A task that is no longer returned (for example one that became blocked after precheck) lands here.
+      process.stderr.write('START_REFUSED: the live pickup returns ' + JSON.stringify(pickedKey)
+        + ' instead of the candidate ' + JSON.stringify(candidate.issueKey) + '\n');
+      return 18;
+    }
+    const pickedReason = picked && typeof picked.reason === 'string' ? picked.reason : null;
+    const liveMode = pickedReason !== null && Object.prototype.hasOwnProperty.call(CANDIDATE_MODES, pickedReason)
+      ? CANDIDATE_MODES[pickedReason] : null;
+    if (liveMode !== candidate.mode) {
+      process.stderr.write('START_REFUSED: mode changed since precheck: candidate ' + JSON.stringify(candidate.mode)
+        + ', the live pickup now says reason ' + JSON.stringify(pickedReason) + ' (mode ' + JSON.stringify(liveMode) + ')\n');
+      return 18;
+    }
+    const found = await findLinkedPr({ key: candidate.issueKey, repo, env });
+    if (!found.ok) {
+      process.stderr.write('START_REFUSED: the live PR lookup failed (' + found.reason + ')\n');
+      return 6;
+    }
+    const diff = liveDiscrepancy(candidate, { mode: liveMode, pr: found.pr });
+    if (diff !== null) {
+      process.stderr.write('START_REFUSED: ' + diff + '\n');
+      return 18;
+    }
+    // Nothing to compare is not a successful comparison, and is reported as such.
+    const candPr = candidate.pr && typeof candidate.pr === 'object' ? candidate.pr : null;
+    const headComparable = candPr !== null && typeof candPr.headSha === 'string' && candPr.headSha !== '';
+    if (stopped()) {
+      process.stderr.write('START_REFUSED: stopped by ' + stopSignal + ' before the claim\n');
+      return stopCode();
+    }
+
+    // 7. The claim: the only place where labels change.
     const cl = runNodeScript({
       script: claimScript,
       argv: ['--project', project, '--issue', candidate.issueKey, '--repo', repo, '--adopt-existing'],
@@ -516,13 +708,17 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       process.stderr.write('START_REFUSED: the claim gate returned ' + cl.code + '\n');
       return cl.code;
     }
-    // 6. Code 0 is read together with state/mode.
+    // From here on the labels are changed.
     const out = parseJsonOutput(cl.stdout);
     const state = out && typeof out.state === 'string' ? out.state : 'unknown';
     const claimMode = out && typeof out.mode === 'string' ? out.mode : null;
+    captured = { issueKey: candidate.issueKey, mode: claimMode !== null ? claimMode : candidate.mode, state };
+
+    if (stopped()) return orphan(stopCode(), 'stopped by ' + stopSignal + ' before the executor started');
+
+    // 8. Code 0 is read together with state/mode.
     if (!Object.prototype.hasOwnProperty.call(STARTABLE_CLAIM_STATES, state) || STARTABLE_CLAIM_STATES[state] !== claimMode) {
-      process.stderr.write('START_REFUSED: claim returned 0 with an unusable state/mode ' + JSON.stringify([state, claimMode]) + '\n');
-      return 5;
+      return orphan(5, 'claim returned 0 with an unusable state/mode ' + JSON.stringify([state, claimMode]));
     }
     const prOut = out.pr && typeof out.pr === 'object' ? out.pr : null;
     const livePr = prOut
@@ -533,33 +729,11 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
           : (out.readiness && out.readiness.headSha ? out.readiness.headSha : null),
       }
       : null;
+    // The last line of defence for the narrow window between the re-read and the claim.
+    const late = liveDiscrepancy(candidate, { mode: claimMode, pr: livePr });
+    if (late !== null) return orphan(18, late);
 
-    // 7. Live data against the candidate. A different mode is never a silent switch.
-    if (claimMode !== candidate.mode) {
-      process.stderr.write('START_REFUSED: mode changed since precheck: candidate ' + JSON.stringify(candidate.mode)
-        + ', now ' + JSON.stringify(claimMode) + '\n');
-      return 18;
-    }
-    const candPr = candidate.pr && typeof candidate.pr === 'object' ? candidate.pr : null;
-    if (candPr === null && livePr !== null) {
-      process.stderr.write('START_REFUSED: a PR appeared since precheck: #' + livePr.number + '\n');
-      return 18;
-    }
-    if (candPr !== null && (livePr === null || livePr.number !== candPr.number)) {
-      process.stderr.write('START_REFUSED: the linked PR changed since precheck: candidate #' + candPr.number
-        + ', now ' + (livePr === null ? 'none' : '#' + livePr.number) + '\n');
-      return 18;
-    }
-    const candHead = candPr && typeof candPr.headSha === 'string' && candPr.headSha ? candPr.headSha : null;
-    if (candHead !== null && candHead !== (livePr ? livePr.headSha : null)) {
-      process.stderr.write('START_REFUSED: the PR head changed since precheck: candidate '
-        + candHead + ', now ' + JSON.stringify(livePr ? livePr.headSha : null) + '\n');
-      return 18;
-    }
-    // Nothing to compare is not a successful comparison, and is reported as such.
-    const headComparable = candHead !== null;
-
-    // 8. The accepted result is saved BEFORE the executor starts, and read back.
+    // 9. The accepted result is saved BEFORE the executor starts, and read back.
     const accepted = { issueKey: candidate.issueKey, state, mode: claimMode, pr: livePr, createdAt: new Date().toISOString() };
     let saved = false;
     try {
@@ -567,21 +741,17 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       const back = readJournal({ stateDir, repoKey });
       saved = back.ok && JSON.stringify(sortDeep(back.record.claim)) === JSON.stringify(sortDeep(accepted));
     } catch { saved = false; }
-    if (!saved) {
-      process.stderr.write('START_REFUSED: the accepted result was not saved to the journal\n');
-      return 5;
-    }
-    // 9. Age of the accepted result.
-    if (!recordFresh(accepted)) {
-      process.stderr.write('START_REFUSED: the accepted result expired before the executor could start\n');
-      return 16;
-    }
+    if (!saved) return orphan(5, 'the accepted result was not saved to the journal');
+    // 10. Age of the accepted result.
+    if (!recordFresh(accepted)) return orphan(16, 'the accepted result expired before the executor could start');
+    if (stopped()) return orphan(stopCode(), 'stopped by ' + stopSignal + ' before the executor started');
+
     process.stdout.write(JSON.stringify({ route: { issueKey: accepted.issueKey, mode: accepted.mode, state, headComparable } }) + '\n');
 
     writeJournal({ stateDir, repoKey, patch: { stage: 'running' } });
 
-    // 10. Spawn. Arguments after `--` are passed exactly as given; the task goes in the environment.
-    const child = spawn(childCmd, childArgs, {
+    // 11. Spawn. Arguments after `--` are passed exactly as given; the task goes in the environment.
+    child = spawn(childCmd, childArgs, {
       stdio: 'inherit',
       shell: false,
       detached: false,
@@ -593,7 +763,6 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       },
     });
 
-    let heartbeatTimer = null;
     try {
       heartbeatTimer = setInterval(() => {
         heartbeat({ stateDir, repoKey, token });
@@ -601,35 +770,30 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
       heartbeatTimer.unref();
     } catch { /* unref not needed in some environments */ }
 
-    // Forward termination signals to the child; the lock is released in the
-    // finally block below once the child has actually gone away.
-    function forwardSignal() {
-      if (!child.killed) {
-        child.kill('SIGTERM');
-      }
-    }
-    process.on('SIGINT', forwardSignal);
-    process.on('SIGTERM', forwardSignal);
-
-    try {
-      // Hold the lock for the whole lifetime of the child process.
-      return await new Promise((resolve) => {
-        child.on('error', () => {
-          // Child could not be spawned at all (for example ENOENT).
-          resolve(127);
-        });
-        child.on('exit', (code, signal) => {
-          resolve(exitCode(code, signal));
-        });
+    // Hold the lock for the whole lifetime of the child process; it is released in the finally block
+    // below, only after the child has actually gone away.
+    const result = await new Promise((resolve) => {
+      child.on('error', (err) => {
+        // Never started at all (for example ENOENT): `pid` is undefined.
+        if (child.pid === undefined) { childGone = true; resolve({ neverStarted: err }); }
       });
-    } finally {
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
-      process.off('SIGINT', forwardSignal);
-      process.off('SIGTERM', forwardSignal);
+      child.on('exit', (code, signal) => {
+        childGone = true;
+        resolve({ code: exitCode(code, signal) });
+      });
+    });
+    if (result.neverStarted) {
+      orphan(127, 'the executor could not be started: ' + (result.neverStarted.code || result.neverStarted.message));
+      return 127;
     }
+    return result.code;
+  } catch (err) {
+    if (captured === null) throw err;
+    return orphan(1, 'exception after the claim: ' + (err && err.message ? err.message : String(err)));
   } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
     // Also covers every refusal above: no executor, lock freed. NOT_HELD is fine.
     releaseQuietly(stateDir, repoKey, token);
   }

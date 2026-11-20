@@ -9,11 +9,13 @@
 // каталоге и не смешиваются с каталогом состояния координатора.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { safeCredentialsEnv, writeStubs, liveEnv, liveOfCandidate } from './helpers/route-env.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..');
@@ -80,7 +82,7 @@ function runCli(args, stateDir, extraEnv = {}) {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 30000,
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
+    env: { ...process.env, ...safeCredentialsEnv(), COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
   });
 }
 
@@ -89,7 +91,7 @@ function startCli(args, stateDir, extraEnv = {}) {
   const child = spawn(process.execPath, [CLI, ...args], {
     cwd: REPO_ROOT,
     stdio: 'ignore',
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
+    env: { ...process.env, ...safeCredentialsEnv(), COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
   });
   const exited = new Promise((resolve) => {
     child.on('exit', (code, signal) => resolve({ code, signal }));
@@ -265,7 +267,7 @@ function runCliEnv(args, stateDir, extraEnv = {}) {
     cwd: REPO_ROOT,
     encoding: 'utf8',
     timeout: 30000,
-    env: { ...process.env, COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
+    env: { ...process.env, ...safeCredentialsEnv(), COORDINATOR_STATE_DIR: stateDir, ...extraEnv },
   });
 }
 
@@ -312,35 +314,6 @@ function holdLock(scratch, stateDir) {
   return lockPath;
 }
 
-/** Stub pickup/claim/gh processes. They log how often (and with what) they were called. */
-function writeStubs(scratch) {
-  const pickup = path.join(scratch, 'pickup-stub.mjs');
-  const claim = path.join(scratch, 'claim-stub.mjs');
-  const gh = path.join(scratch, 'gh-stub.mjs');
-  fs.writeFileSync(pickup, [
-    "import fs from 'node:fs';",
-    "if (process.env.PK_LOG) fs.appendFileSync(process.env.PK_LOG, process.argv.slice(2).join(' ') + '\\n');",
-    "process.stdout.write((process.env.PK_OUT || '') + '\\n');",
-    'process.exit(Number(process.env.PK_CODE || 0));',
-  ].join('\n'));
-  fs.writeFileSync(claim, [
-    "import fs from 'node:fs';",
-    "if (process.env.CL_LOG) fs.appendFileSync(process.env.CL_LOG, process.argv.slice(2).join(' ') + '\\n');",
-    "if (process.env.CL_SABOTAGE_JOURNAL) { fs.rmSync(process.env.CL_SABOTAGE_JOURNAL, { force: true }); fs.mkdirSync(process.env.CL_SABOTAGE_JOURNAL); }",
-    "process.stdout.write((process.env.CL_OUT || '') + '\\n');",
-    'process.exit(Number(process.env.CL_CODE || 0));',
-  ].join('\n'));
-  fs.writeFileSync(gh, [
-    "import fs from 'node:fs';",
-    'const a = process.argv.slice(2);',
-    "if (process.env.GH_LOG) fs.appendFileSync(process.env.GH_LOG, a.join(' ') + '\\n');",
-    "if (a[0] === 'pr' && a[1] === 'list') { process.stdout.write(process.env.GH_LIST || '[]'); process.exit(Number(process.env.GH_LIST_CODE || 0)); }",
-    "if (a[0] === 'pr' && a[1] === 'view') { process.stdout.write(process.env.GH_VIEW || '{}'); process.exit(Number(process.env.GH_VIEW_CODE || 0)); }",
-    'process.exit(99);',
-  ].join('\n'));
-  return { pickup, claim, gh };
-}
-
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const PR_URL = 'https://gh.test/o/r/pull/42';
@@ -356,10 +329,14 @@ function freshCandidate(over = {}) {
 
 function agoIso(ms) { return new Date(Date.now() - ms).toISOString(); }
 
-/** Env for `start`: the claim gate is a stub; CL_LOG counts its calls. */
-function claimEnv(scratch, { code = 0, out = CLAIMED, extra = {} } = {}) {
+/**
+ * Env for `start`: the claim gate AND the live re-read (pickup, gh) are stubs; CL_LOG counts the gate's
+ * calls. `live` says what the re-read returns (default: a ready task without a PR).
+ */
+function claimEnv(scratch, { code = 0, out = CLAIMED, live = {}, extra = {} } = {}) {
   const stubs = writeStubs(scratch);
   return {
+    ...liveEnv(scratch, live),
     PRECHECK_CLAIM_SCRIPT: stubs.claim,
     CL_CODE: String(code), CL_OUT: JSON.stringify(out),
     CL_LOG: path.join(scratch, 'claim.log'),
@@ -372,10 +349,10 @@ function claimCalls(scratch) {
   return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean) : [];
 }
 
-/** Seeds a fresh candidate and returns the env for `start`. */
-function prepareRoute(scratch, stateDir, { candidate = freshCandidate(), ...claimOpts } = {}) {
+/** Seeds a fresh candidate and returns the env for `start`; the live re-read mirrors the candidate unless `live` overrides it. */
+function prepareRoute(scratch, stateDir, { candidate = freshCandidate(), live = {}, ...claimOpts } = {}) {
   if (candidate !== null) seedPatch(scratch, stateDir, { candidate });
-  return claimEnv(scratch, claimOpts);
+  return claimEnv(scratch, { ...claimOpts, live: { ...liveOfCandidate(candidate), ...live } });
 }
 
 /** A child that records its environment, argv and the journal it can see at launch. */
@@ -419,6 +396,7 @@ const PRECHECK_ARGS = ['precheck', '--project', 'KAN', '--repo', 'o/r'];
 function precheckEnv(scratch, { pkCode = 0, pkOut, reason = 'ready', ghList = '[]', ghView = '{}', ghListCode = 0, ghViewCode = 0 } = {}) {
   const stubs = writeStubs(scratch);
   return {
+    ...safeCredentialsEnv(),
     PRECHECK_PICKUP_SCRIPT: stubs.pickup,
     PRECHECK_CLAIM_SCRIPT: stubs.claim, // must never be called by precheck
     PICKUP_GH_EXEC: stubs.gh,
@@ -698,67 +676,199 @@ for (const [code, state] of [[2, 'not_found'], [3, 'not_ready'], [4, 'awaiting_m
   });
 }
 
+// ---------------------------------------------------------------------------
+// R2 (fix round) — "captured but not started" is a separate state, not an ordinary refusal.
+// Everything below the claim leaves an orphanedClaim; labels are never put back by the route.
+// ---------------------------------------------------------------------------
+const ISO_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+
+function orphanRecord(c) { return readRecord(c.scratch, c.stateDir).orphanedClaim; }
+
+/** The orphan is recorded, printed in the contract format, and nothing was started or put back. */
+function assertOrphaned(c, r, { code, state, mode = 'implement', reason }) {
+  assert.equal(r.status, code, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.ok(!fs.existsSync(c.marker), 'the executor must not have been started');
+  assert.ok(!lockHeld(c.stateDir), 'the lock must be released');
+  const o = orphanRecord(c);
+  assert.ok(o, 'orphanedClaim must be in the journal: ' + r.stderr);
+  assert.deepStrictEqual(Object.keys(o).sort(), ['code', 'createdAt', 'issueKey', 'mode', 'reason', 'state']);
+  assert.equal(o.issueKey, 'KAN-14');
+  assert.equal(o.mode, mode);
+  assert.equal(o.state, state);
+  assert.equal(o.code, code);
+  assert.match(o.createdAt, ISO_RE);
+  assert.ok(Math.abs(Date.now() - Date.parse(o.createdAt)) < 60000);
+  if (reason) assert.match(o.reason, reason);
+  const line = `ORPHANED_CLAIM: KAN-14 ${mode} code=${code} ${o.reason}`;
+  assert.ok(r.stderr.split('\n').includes(line), 'the contract line must be printed: ' + r.stderr);
+  assert.doesNotMatch(r.stderr, /ORPHANED_CLAIM_UNRECORDED/, 'the record succeeded, so nothing is unrecorded');
+  assert.equal(claimCalls(c.scratch).length, 1, 'the route never calls the gate again to put labels back');
+}
+
 for (const [state, mode] of [['claimed', 'review'], ['review_pending', 'implement'], ['closing', 'implement'], ['work_exists', null], ['unknown_state', 'implement']]) {
-  test(`R5: gate 0 with ${state}/${mode} is not a permit → 5, no executor`, (t) => {
+  test(`R5/R2: gate 0 with ${state}/${mode} is not a permit → 5, no executor, an orphanedClaim`, (t) => {
     const c = newCase();
     t.after(c.cleanup);
     const env = prepareRoute(c.scratch, c.stateDir, { out: { success: true, state, reason: state, mode, pr: null } });
-    assertRefused(runStart(c, env), { code: 5, marker: c.marker, stateDir: c.stateDir });
+    const r = runStart(c, env);
+    // the orphan names the mode the gate answered with, or the candidate's when it answered none
+    assertOrphaned(c, r, { code: 5, state, mode: mode === null ? 'implement' : mode, reason: /unusable state\/mode/ });
     assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'nothing is accepted');
   });
 }
 
-test('R5.3: candidate implement, the gate now gives review → 18 naming both modes; no executor; the new mode is not worked or recorded', (t) => {
+// ---------------------------------------------------------------------------
+// R1 (fix round) — the live data is re-read BEFORE the claim, read-only. A discrepancy means the gate is
+// never called, so nothing is mutated and no orphan is left.
+// ---------------------------------------------------------------------------
+/** Refused before the claim: gate calls = 0, nothing started, lock released, no accepted result, NO orphan. */
+function assertRefusedBeforeClaim(c, r, code) {
+  assertRefused(r, { code, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(claimCalls(c.scratch).length, 0, 'the gate (the only label mutator) must not be called');
+  const rec = readRecord(c.scratch, c.stateDir);
+  assert.equal(rec.claim, null, 'no accepted result');
+  assert.equal(rec.orphanedClaim, null, 'nothing was captured, so no orphan');
+}
+
+test('R1: the re-read comes BEFORE the claim — pickup, PR list, PR view, then the gate (one shared call log)', (t) => {
   const c = newCase();
   t.after(c.cleanup);
-  const env = prepareRoute(c.scratch, c.stateDir, { out: REVIEW() }); // review is itself a permitting mode
-  const r = runStart(c, env);
-  assertRefused(r, { code: 18, marker: c.marker, stateDir: c.stateDir });
-  assert.match(r.stderr, /implement/);
-  assert.match(r.stderr, /review/);
-  assert.equal(claimCalls(c.scratch).length, 1, 'the live check ran');
-  assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'no accepted result for the other mode');
-  // and not even by re-targeting: the same call with --mode review is refused as a mismatch with the candidate
-  assertRefused(runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') }), { code: 17, marker: c.marker, stateDir: c.stateDir });
+  const seq = path.join(c.scratch, 'sequence.log');
+  const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: REVIEW(42, SHA_A), extra: { PK_LOG: seq, GH_LOG: seq, CL_LOG: seq } });
+  const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = fs.readFileSync(seq, 'utf8').split('\n').filter(Boolean);
+  const kinds = lines.map((l) => (l.startsWith('--project KAN --issue') ? 'claim' : l.startsWith('--project') ? 'pickup' : l.startsWith('pr list') ? 'list' : l.startsWith('pr view') ? 'view' : l));
+  assert.deepStrictEqual(kinds, ['pickup', 'list', 'view', 'claim']);
+  assert.match(lines[0], /--json/);
 });
 
-test('R5.4: the PR head changed since precheck → 18, no executor', (t) => {
+test('R1: the re-read only reads — every gh verb is pr list / pr view, and the pickup is asked with the same flags as precheck', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: REVIEW(42, SHA_A) });
+  assert.equal(runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') }).status, 0);
+  const gh = fs.readFileSync(env.GH_LOG, 'utf8').split('\n').filter(Boolean);
+  assert.ok(gh.length >= 2 && gh.every((l) => /^pr (list|view) /.test(l)), gh.join(' | '));
+  assert.equal(fs.readFileSync(env.PK_LOG, 'utf8').trim(), '--project KAN --repo o/r --json');
+});
+
+test('R5.3/R1: candidate implement, the live pickup now says review (a PR appeared) → 18 naming both modes, the gate is NOT called, the new mode is not worked or recorded', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, {
+    live: { mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } }, out: REVIEW(),
+  });
+  const r = runStart(c, env);
+  assertRefusedBeforeClaim(c, r, 18);
+  assert.match(r.stderr, /implement/);
+  assert.match(r.stderr, /review/);
+  assert.equal(fs.readFileSync(env.PK_LOG, 'utf8').trim().split('\n').length, 1, 'the live check ran');
+  // and not even by re-targeting: the same call with --mode review is refused as a mismatch with the candidate
+  assertRefused(runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') }), { code: 17, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(claimCalls(c.scratch).length, 0);
+});
+
+test('R5.4/R1: the PR head changed since precheck → 18 before the claim', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, live: { pr: { number: 42, url: PR_URL, headSha: SHA_B } }, out: REVIEW(42, SHA_B) });
+  const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
+  assertRefusedBeforeClaim(c, r, 18);
+  assert.match(r.stderr, /head/);
+});
+
+test('R5.5/R1: the linked PR changed (another number) → 18 before the claim', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, live: { pr: { number: 43, url: PR_URL, headSha: SHA_A } }, out: REVIEW(43, SHA_A) });
+  const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
+  assertRefusedBeforeClaim(c, r, 18);
+  assert.match(r.stderr, /#42/);
+  assert.match(r.stderr, /#43/);
+});
+
+test('R1: the candidate had a PR but now none is found → 18 before the claim', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const cand = freshCandidate({ mode: 'implement', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
+  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, live: { pr: null }, out: CLAIMED });
+  assertRefusedBeforeClaim(c, runStart(c, env), 18);
+});
+
+test('R1: the mode is the same but a PR appeared that the candidate did not have → 18 before the claim', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, { live: { pr: { number: 42, url: PR_URL, headSha: SHA_A } }, out: CLAIMED });
+  assertRefusedBeforeClaim(c, runStart(c, env), 18);
+});
+
+test('R1: the lock on the task appeared after precheck — the pickup no longer returns it → 18, the gate is never called', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  // a blocked task is not returned by the pickup: it returns another issue (or the same task is gone)
+  const env = prepareRoute(c.scratch, c.stateDir, { live: { issue: 'KAN-99' } });
+  const r = runStart(c, env);
+  assertRefusedBeforeClaim(c, r, 18);
+  assert.match(r.stderr, /KAN-99/);
+  assert.match(r.stderr, /KAN-14/);
+});
+
+test('R1: the live pickup returns 0 without an issue, or with a reason outside the table → 18, the gate is not called', (t) => {
+  for (const pkOut of [
+    JSON.stringify({ work: true, reason: 'ready', issue: null }),
+    JSON.stringify({ work: true, reason: 'closing_ci_pending', issue: { key: 'KAN-14' } }),
+    JSON.stringify({ work: true, reason: 'weird', issue: { key: 'KAN-14' } }),
+    JSON.stringify({ work: true, issue: { key: 'KAN-14' } }),
+  ]) {
+    const c = newCase();
+    try {
+      const env = prepareRoute(c.scratch, c.stateDir, { live: { pkOut } });
+      assertRefusedBeforeClaim(c, runStart(c, env), 18);
+    } finally { c.cleanup(); }
+  }
+});
+
+for (const [pkCode, pkOut] of [[3, '{"work":false,"reason":"none","issue":null}'], [4, '{"work":false,"reason":"unavailable","issue":null}'], [2, '']]) {
+  test(`R1: the live pickup returns ${pkCode} → the route stops with that code, the gate is not called`, (t) => {
+    const c = newCase();
+    t.after(c.cleanup);
+    const env = prepareRoute(c.scratch, c.stateDir, { live: { pkCode, pkOut } });
+    const r = runStart(c, env);
+    assertRefusedBeforeClaim(c, r, pkCode);
+  });
+}
+
+test('R1: a live PR lookup that FAILED is not "no PR": 6, the gate is not called', (t) => {
+  for (const extra of [{ GH_LIST_CODE: '1' }, { GH_LIST: 'not json' }, { GH_LIST: '{"a":1}' }]) {
+    const c = newCase();
+    try {
+      const env = prepareRoute(c.scratch, c.stateDir, { extra });
+      assertRefusedBeforeClaim(c, runStart(c, env), 6);
+    } finally { c.cleanup(); }
+  }
+});
+
+test('R2/R1 last line of defence: the live re-read agrees with the candidate but the GATE answers another mode → 18, and now it IS an orphan (the labels changed)', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir, { out: REVIEW() }); // re-read: implement; gate: review
+  const r = runStart(c, env);
+  assertOrphaned(c, r, { code: 18, state: 'review_pending', mode: 'review', reason: /mode changed/ });
+  assert.equal(readRecord(c.scratch, c.stateDir).claim, null, 'the other mode is not accepted');
+});
+
+test('R2/R1 last line of defence: the gate answers another PR head → 18 and an orphan', (t) => {
   const c = newCase();
   t.after(c.cleanup);
   const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
   const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: REVIEW(42, SHA_B) });
   const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
-  assertRefused(r, { code: 18, marker: c.marker, stateDir: c.stateDir });
-  assert.match(r.stderr, /head/);
-  assert.equal(claimCalls(c.scratch).length, 1);
-});
-
-test('R5.5: the linked PR changed (another number) → 18, no executor', (t) => {
-  const c = newCase();
-  t.after(c.cleanup);
-  const cand = freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
-  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: REVIEW(43, SHA_A) });
-  const r = runStart(c, env, { flags: ROUTE_FLAGS('KAN-14', 'review') });
-  assertRefused(r, { code: 18, marker: c.marker, stateDir: c.stateDir });
-  assert.match(r.stderr, /#42/);
-  assert.match(r.stderr, /#43/);
-});
-
-test('R2: the candidate had a PR but now none is found → 18', (t) => {
-  const c = newCase();
-  t.after(c.cleanup);
-  const cand = freshCandidate({ mode: 'implement', pr: { number: 42, url: PR_URL, headSha: SHA_A } });
-  const env = prepareRoute(c.scratch, c.stateDir, { candidate: cand, out: CLAIMED });
-  assertRefused(runStart(c, env), { code: 18, marker: c.marker, stateDir: c.stateDir });
-});
-
-test('R2: the mode is the same but a PR appeared that the candidate did not have → 18', (t) => {
-  const c = newCase();
-  t.after(c.cleanup);
-  const env = prepareRoute(c.scratch, c.stateDir, {
-    out: { ...CLAIMED, pr: { number: 42, state: 'OPEN', url: PR_URL, headSha: SHA_A } },
-  });
-  assertRefused(runStart(c, env), { code: 18, marker: c.marker, stateDir: c.stateDir });
+  assertOrphaned(c, r, { code: 18, state: 'review_pending', mode: 'review', reason: /head/ });
 });
 
 test('R2: a head that was compared is reported headComparable:true; an unknown candidate head is reported false, not passed off as compared', (t) => {
@@ -774,8 +884,10 @@ test('R2: a head that was compared is reported headComparable:true; an unknown c
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /"headComparable":true/);
 
+  // the candidate had no head: whatever head is found now, nothing was compared
   env = prepareRoute(noHead.scratch, noHead.stateDir, {
-    candidate: freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: null } }), out: REVIEW(42, SHA_B),
+    candidate: freshCandidate({ mode: 'review', pr: { number: 42, url: PR_URL, headSha: null } }),
+    live: { pr: { number: 42, url: PR_URL, headSha: SHA_B } }, out: REVIEW(42, SHA_B),
   });
   r = runStart(noHead, env, { flags });
   assert.equal(r.status, 0, r.stderr);
@@ -783,7 +895,7 @@ test('R2: a head that was compared is reported headComparable:true; an unknown c
   assert.doesNotMatch(r.stdout, /"headComparable":true/);
 });
 
-test('R5.9: the accepted result cannot be saved (journal is unwritable under the lock) → 5, no executor', (t) => {
+test('R5.9/R2: the accepted result cannot be saved (journal is unwritable under the lock) → 5, no executor; the orphan cannot be recorded EITHER, so it is printed and marked UNRECORDED', (t) => {
   const c = newCase();
   t.after(c.cleanup);
   const env = prepareRoute(c.scratch, c.stateDir, {
@@ -791,8 +903,152 @@ test('R5.9: the accepted result cannot be saved (journal is unwritable under the
   });
   // the gate stub replaces journal.json with a directory right before it answers 0
   env.CL_SABOTAGE_JOURNAL = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
-  assertRefused(runStart(c, env), { code: 5, marker: c.marker, stateDir: c.stateDir });
+  const r = runStart(c, env);
+  assertRefused(r, { code: 5, marker: c.marker, stateDir: c.stateDir });
   assert.equal(claimCalls(c.scratch).length, 1, 'the claim itself happened; only the saving failed');
+  const lines = r.stderr.split('\n');
+  assert.ok(lines.some((l) => /^ORPHANED_CLAIM: KAN-14 implement code=5 .*not saved/.test(l)), 'printed regardless of the journal: ' + r.stderr);
+  assert.ok(lines.includes('ORPHANED_CLAIM_UNRECORDED'), 'the failed record is announced: ' + r.stderr);
+});
+
+test('R2: the executor cannot be started (ENOENT) → 127 AND an orphan; the gate is not called again', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  const r = runStart(c, env, { tail: ['definitely-not-a-real-binary-xyz'] });
+  assertOrphaned(c, r, { code: 127, state: 'claimed', reason: /could not be started/ });
+});
+
+// ---------------------------------------------------------------------------
+// R2 — while an orphanedClaim exists: precheck writes no candidate (14), start refuses before the claim (14)
+// ---------------------------------------------------------------------------
+const ORPHAN = { issueKey: 'KAN-14', mode: 'implement', state: 'claimed', code: 5, reason: 'seeded by the test', createdAt: new Date().toISOString() };
+
+test('R2: an unresolved orphan → precheck returns 14, writes no candidate, asks no source', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  const old = freshCandidate({ issueKey: 'KAN-1', createdAt: agoIso(60000) });
+  seedPatch(c.scratch, c.stateDir, { candidate: old, orphanedClaim: ORPHAN });
+  const env = precheckEnv(c.scratch, {});
+  const r = runCliEnv(PRECHECK_ARGS, c.stateDir, env);
+  assert.equal(r.status, 14, r.stdout + r.stderr);
+  assert.match(r.stderr, /orphaned claim/);
+  assert.deepStrictEqual(readRecord(c.scratch, c.stateDir).candidate, old, 'the candidate was not rewritten');
+  assert.ok(!fs.existsSync(env.GH_LOG), 'no PR lookup');
+});
+
+test('R2: an unresolved orphan → start returns 14 BEFORE the claim, even with a fresh matching candidate', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  const r = runStart(c, env);
+  assertRefused(r, { code: 14, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(claimCalls(c.scratch).length, 0, 'the gate must not be called');
+  assert.ok(!fs.existsSync(env.PK_LOG), 'not even the re-read ran');
+  assert.deepStrictEqual(orphanRecord(c), ORPHAN, 'the record is untouched');
+});
+
+test('R2: an orphan of ANOTHER issue blocks the route just the same (the state of the repository is undefined)', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: { ...ORPHAN, issueKey: 'KAN-7' } });
+  assertRefused(runStart(c, env), { code: 14, marker: c.marker, stateDir: c.stateDir });
+  assert.equal(runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {})).status, 14);
+});
+
+test('R2: the lock is taken before the orphan is read — a held lock is still 9', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  holdLock(c.scratch, c.stateDir);
+  assert.equal(runStart(c, env).status, 9);
+});
+
+// ---------------------------------------------------------------------------
+// R2 — clear-orphan: a human decision, the journal only, Jira untouched
+// ---------------------------------------------------------------------------
+const CLEAR = (issue = 'KAN-14') => ['clear-orphan', '--issue', issue, '--confirm', '--reason', 'looked at the labels, fine'];
+
+test('R2: clear-orphan without --confirm or without --reason → 12, the record stays', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  for (const args of [
+    ['clear-orphan', '--issue', 'KAN-14'],
+    ['clear-orphan', '--issue', 'KAN-14', '--confirm'],
+    ['clear-orphan', '--issue', 'KAN-14', '--reason', 'because'],
+    ['clear-orphan', '--issue', 'KAN-14', '--confirm', '--reason', ''],
+  ]) {
+    const r = runCliEnv(args, c.stateDir);
+    assert.equal(r.status, 12, args.join(' ') + r.stdout + r.stderr);
+    assert.deepStrictEqual(orphanRecord(c), ORPHAN, 'nothing may be cleared without the confirmation');
+  }
+});
+
+test('R2: clear-orphan --issue that does not match the record → 17, the record stays', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  const r = runCliEnv(CLEAR('KAN-15'), c.stateDir);
+  assert.equal(r.status, 17, r.stdout + r.stderr);
+  assert.deepStrictEqual(orphanRecord(c), ORPHAN);
+});
+
+test('R2: clear-orphan with no record → 0', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  assert.equal(runCliEnv(CLEAR(), c.stateDir).status, 0);
+  seedPatch(c.scratch, c.stateDir, { stage: 'x' });
+  assert.equal(runCliEnv(CLEAR(), c.stateDir).status, 0);
+});
+
+test('R2: clear-orphan removes the record, writes nothing to Jira (no gate, no pickup, no gh), and the route works again', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  assertRefused(runStart(c, env), { code: 14, marker: c.marker, stateDir: c.stateDir });
+  const r = runCliEnv(CLEAR(), c.stateDir, env);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(orphanRecord(c), null);
+  assert.equal(claimCalls(c.scratch).length, 0, 'the gate is not called by clear-orphan');
+  assert.ok(!fs.existsSync(env.PK_LOG) && !fs.existsSync(env.GH_LOG), 'no source is asked');
+  // the candidate is still fresh: the route may start now
+  const again = runStart(c, env);
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.ok(fs.existsSync(c.marker));
+});
+
+test('R2: status and recover show the orphanedClaim when there is one, and not when there is none', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  seedPatch(c.scratch, c.stateDir, { stage: 'running' });
+  assert.doesNotMatch(runCliEnv(['status'], c.stateDir).stdout, /orphanedClaim/);
+  assert.doesNotMatch(runCliEnv(['recover'], c.stateDir).stdout, /orphanedClaim/);
+  seedPatch(c.scratch, c.stateDir, { orphanedClaim: ORPHAN });
+  for (const cmd of ['status', 'recover']) {
+    const out = runCliEnv([cmd], c.stateDir).stdout;
+    assert.match(out, /orphanedClaim: \{/, cmd);
+    assert.match(out, /seeded by the test/, cmd);
+  }
+});
+
+test('R2: a journal of the previous format (no orphanedClaim) is not damaged and reads as null', (t) => {
+  const c = newCase('cli-orph-');
+  t.after(c.cleanup);
+  seedPatch(c.scratch, c.stateDir, { stage: 'running' });
+  const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
+  const rec = JSON.parse(fs.readFileSync(jf, 'utf8'));
+  delete rec.orphanedClaim; delete rec.claim; delete rec.candidate;
+  const { checksum, ...body } = rec;
+  const sorted = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v);
+  rec.checksum = crypto.createHash('sha256').update(JSON.stringify(sorted(body))).digest('hex');
+  fs.writeFileSync(jf, JSON.stringify(rec));
+  assert.equal(readRecord(c.scratch, c.stateDir).orphanedClaim, null);
+  assert.equal(runCliEnv(['status'], c.stateDir).status, 0);
 });
 
 test('R2: success — accepted result saved BEFORE the executor, executor gets the task in the environment, argv untouched, lock released', (t) => {
@@ -906,4 +1162,66 @@ test('R3: force-release without --confirm/--reason is still 12; status shows own
   const st = runCliEnv(['status'], c.stateDir);
   assert.match(st.stdout, /ownerState: alive/);
   assert.doesNotMatch(st.stdout, /SECRET-TOKEN-xyz/);
+});
+
+// ---------------------------------------------------------------------------
+// R5 (fix round) — a mis-wired gate must not reach anything outside this machine.
+// The REAL pickup.js runs (nothing replaces it); the credentials are the test ones and point to a local
+// listener. Home directories are redirected to an empty folder, so even a credentials file that is
+// looked up "by default" cannot be found.
+// ---------------------------------------------------------------------------
+import http from 'node:http';
+
+test('R5: with the pickup/claim scripts NOT replaced, the route talks only to the local test address, with the TEST credentials, and stops', async (t) => {
+  const c = newCase('cli-r5-');
+  const credsDir = mkTmp('cli-r5-creds-');
+  const emptyHome = mkTmp('cli-r5-home-');
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ url: req.url, host: req.headers.host, auth: req.headers.authorization });
+    req.resume();
+    res.statusCode = 500;
+    res.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); c.cleanup(); rmTmp(credsDir); rmTmp(emptyHome); });
+  const { port } = server.address();
+
+  const credsFile = path.join(credsDir, 'jira-creds.json');
+  fs.writeFileSync(credsFile, JSON.stringify({ site: `http://127.0.0.1:${port}`, email: 'test@example.com', token: 'test-token-not-real' }));
+
+  const env = prepareRoute(c.scratch, c.stateDir);
+  delete env.PRECHECK_PICKUP_SCRIPT; // deliberately: the real pickup.js
+  delete env.PRECHECK_CLAIM_SCRIPT;  // deliberately: the real claim.js
+  const child = spawn(process.execPath, [CLI, 'start', ...ROUTE_FLAGS(), '--', process.execPath, c.child], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...env, JIRA_CREDENTIALS_FILE: credsFile, COORDINATOR_STATE_DIR: c.stateDir, HOME: emptyHome, USERPROFILE: emptyHome },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = ''; let stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+
+  assert.equal(code, 4, 'the source answered 500: unavailable, not "no work". ' + stdout + stderr);
+  assert.ok(requests.length > 0, 'premise: the real pickup really ran and used the credentials file it was given');
+  const expectedAuth = 'Basic ' + Buffer.from('test@example.com:test-token-not-real').toString('base64');
+  for (const rq of requests) {
+    assert.equal(rq.host, `127.0.0.1:${port}`, 'every request goes to the local address');
+    assert.equal(rq.auth, expectedAuth, 'and carries the test credentials');
+  }
+  assert.ok(!fs.existsSync(c.marker), 'no executor');
+  assert.equal(claimCalls(c.scratch).length, 0);
+  assert.doesNotMatch(stdout + stderr, /test-token-not-real/, 'no secret is printed');
+});
+
+test('R5: every environment factory of these tests names a LOCAL credentials file (the safe default cannot be lost)', (t) => {
+  const c = newCase('cli-r5-');
+  t.after(c.cleanup);
+  for (const env of [claimEnv(c.scratch), prepareRoute(c.scratch, c.stateDir), precheckEnv(c.scratch, {}), safeCredentialsEnv()]) {
+    assert.ok(env.JIRA_CREDENTIALS_FILE, 'JIRA_CREDENTIALS_FILE is set explicitly');
+    const creds = JSON.parse(fs.readFileSync(env.JIRA_CREDENTIALS_FILE, 'utf8'));
+    assert.match(creds.site, /^http:\/\/127\.0\.0\.1:\d+$/, 'a local address');
+    assert.equal(creds.token, 'test-token-not-real');
+  }
 });

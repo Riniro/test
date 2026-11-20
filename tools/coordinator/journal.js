@@ -18,6 +18,7 @@ const KNOWN_KEYS = new Set([
   'lastConfirmedAction',
   'claim',
   'candidate',
+  'orphanedClaim',
   'updatedAt',
   'checksum',
 ]);
@@ -56,6 +57,9 @@ const DEFAULTS = {
   // Candidate written by precheck: null or { issueKey, mode, pr: { number, url, headSha } | null, createdAt }.
   // Also NOT in REQUIRED_KEYS. `createdAt` is set once and is the only source of the record's age.
   candidate: null,
+  // Set when a claim changed the labels but the executor never started:
+  // null or { issueKey, mode, state, code, reason, createdAt }. NOT in REQUIRED_KEYS; only a human clears it.
+  orphanedClaim: null,
 };
 
 function journalPath({ stateDir, repoKey }) {
@@ -243,6 +247,9 @@ function read({ stateDir, repoKey }) {
   }
   if (!('candidate' in record)) {
     record = { ...record, candidate: null };
+  }
+  if (!('orphanedClaim' in record)) {
+    record = { ...record, orphanedClaim: null };
   }
 
   return { ok: true, record };

@@ -518,3 +518,56 @@ after(() => {
     }
   } catch { /* ignore */ }
 });
+
+// ------------------------------------------------------------------
+// orphanedClaim: a known key, NOT required, covered by the checksum, null in the previous format
+// ------------------------------------------------------------------
+const ORPHAN = {
+  issueKey: 'KAN-14', mode: 'implement', state: 'claimed', code: 5,
+  reason: 'the accepted result was not saved to the journal', createdAt: '2026-11-20T02:00:00.000Z',
+};
+
+test('orphanedClaim: stored, read back unchanged, defaults to null, survives later writes, can be set back to null', () => {
+  const repoKey = 'orphan-basic';
+  write({ stateDir, repoKey, patch: { stage: 'x' } });
+  assert.equal(read({ stateDir, repoKey }).record.orphanedClaim, null);
+  write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } });
+  write({ stateDir, repoKey, patch: { stage: 'running' } });
+  const r = read({ stateDir, repoKey });
+  assert.deepStrictEqual(r.record.orphanedClaim, ORPHAN);
+  assert.equal(r.record.orphanedClaim.createdAt, ORPHAN.createdAt, 'its own creation time is not rewritten by a later write');
+  write({ stateDir, repoKey, patch: { orphanedClaim: null } });
+  assert.equal(read({ stateDir, repoKey }).record.orphanedClaim, null);
+});
+
+test('orphanedClaim: a field changed INSIDE it breaks the checksum', () => {
+  const repoKey = 'orphan-checksum';
+  write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } });
+  const fp = journalPath({ stateDir, repoKey });
+  const orig = fs.readFileSync(fp, 'utf8');
+  for (const mutate of [(o) => { o.code = 0; }, (o) => { o.issueKey = 'KAN-15'; }, (o) => { o.createdAt = '2030-01-01T00:00:00.000Z'; }]) {
+    const rec = JSON.parse(orig);
+    mutate(rec.orphanedClaim);
+    fs.writeFileSync(fp, JSON.stringify(rec));
+    const r = read({ stateDir, repoKey });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'CHECKSUM_MISMATCH');
+  }
+});
+
+test('orphanedClaim: a journal of the previous format (no orphanedClaim) reads as null, passes integrity and is appended', () => {
+  const repoKey = 'orphan-old-format';
+  const old = {
+    version: 1, issueKey: 'KAN-6', stage: 'planning', runId: null, taskId: null, dispatchIds: [],
+    branch: null, commitSha: null, prUrl: null, lastConfirmedAction: null,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  old.checksum = checksumOf(old);
+  fs.mkdirSync(path.dirname(journalPath({ stateDir, repoKey })), { recursive: true });
+  fs.writeFileSync(journalPath({ stateDir, repoKey }), JSON.stringify(old));
+  const r = read({ stateDir, repoKey });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.record.orphanedClaim, null);
+  assert.equal(write({ stateDir, repoKey, patch: { orphanedClaim: ORPHAN } }).ok, true);
+  assert.deepStrictEqual(read({ stateDir, repoKey }).record.orphanedClaim, ORPHAN);
+});
