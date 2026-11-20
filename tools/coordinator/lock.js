@@ -99,21 +99,19 @@ function status({ stateDir, repoKey, ttlMs } = {}) {
   const ttl = ttlMs ?? DEFAULT_TTL_MS;
 
   if (!fs.existsSync(lockPath)) {
-    return { held: false, owner: null, processAlive: null, ageMs: null, stale: false };
+    return { held: false, owner: null, processAlive: null, ownerState: null, ownerUnverified: null, ageMs: null, stale: false };
   }
 
   const owner = readOwner(lockPath);
   if (!owner) {
-    return { held: true, owner: null, processAlive: null, ageMs: null, stale: false };
+    return { held: true, owner: null, processAlive: null, ownerState: 'undetermined', ownerUnverified: 'owner.json is missing or unreadable', ageMs: null, stale: false };
   }
 
+  // Kept for compatibility, but it is only an answer about the owner on the owner's own host.
+  const cls = classifyOwner(owner);
+  const sameHost = typeof owner.host === 'string' && owner.host === os.hostname();
   let processAlive = null;
-  try {
-    process.kill(owner.pid, 0);
-    processAlive = true;
-  } catch {
-    processAlive = false;
-  }
+  if (sameHost && typeof owner.pid === 'number') processAlive = cls.state === 'alive';
 
   const ageMs = Date.now() - new Date(owner.heartbeatAt).getTime();
 
@@ -121,6 +119,8 @@ function status({ stateDir, repoKey, ttlMs } = {}) {
     held: true,
     owner,
     processAlive,
+    ownerState: cls.state,
+    ownerUnverified: cls.unverified,
     ageMs: ageMs > 0 ? ageMs : 0,
     stale: ageMs > ttl,
   };
@@ -144,6 +144,39 @@ function heartbeat({ stateDir, repoKey, token }) {
   return { ok: true };
 }
 
+/**
+ * Classifies the owner of a held lock: three outcomes, not two.
+ *  - dead:         owner.host is this host AND process owner.pid does not answer;
+ *  - alive:        process owner.pid answers on its own host;
+ *  - undetermined: another host, no/unreadable owner.json, or a missing / non-numeric pid.
+ * A pid is meaningful only on the owner's host, so a foreign host is never "dead".
+ * @returns {{ state: 'dead'|'alive'|'undetermined', unverified: string|null }}
+ */
+function classifyOwner(owner, { host } = {}) {
+  if (owner === null || owner === undefined || typeof owner !== 'object' || Array.isArray(owner)) {
+    return { state: 'undetermined', unverified: 'owner.json is missing or unreadable' };
+  }
+  if (typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || owner.pid <= 0) {
+    return { state: 'undetermined', unverified: 'owner.pid is missing or not a number' };
+  }
+  const here = host === undefined ? os.hostname() : host;
+  if (typeof owner.host !== 'string' || owner.host !== here) {
+    return {
+      state: 'undetermined',
+      unverified: 'owner host ' + JSON.stringify(owner.host === undefined ? null : owner.host)
+        + ' differs from this host; a pid can be checked only on the host of the owner',
+    };
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return { state: 'alive', unverified: null };
+  } catch (err) {
+    // EPERM means the process exists but is not ours: it answers, so it is alive.
+    if (err && err.code === 'EPERM') return { state: 'alive', unverified: null };
+    return { state: 'dead', unverified: null };
+  }
+}
+
 function forceRelease({ stateDir, repoKey, confirm, reason }) {
   if (confirm !== true || !reason || typeof reason !== 'string' || reason.length === 0) {
     return { ok: false, reason: 'CONFIRMATION_REQUIRED' };
@@ -156,6 +189,18 @@ function forceRelease({ stateDir, repoKey, confirm, reason }) {
   }
 
   const owner = readOwner(lockPath);
+  const cls = classifyOwner(owner);
+  if (cls.state !== 'dead') {
+    return {
+      ok: false,
+      reason: 'OWNER_NOT_DEAD',
+      ownerState: cls.state,
+      unverified: cls.state === 'alive'
+        ? 'owner process ' + owner.pid + ' answers on this host'
+        : cls.unverified,
+      owner,
+    };
+  }
   fs.rmSync(lockPath, { recursive: true, force: false });
 
   return { ok: true, released: owner };
@@ -167,5 +212,6 @@ export {
   status,
   heartbeat,
   forceRelease,
+  classifyOwner,
   lockDir,
 };
