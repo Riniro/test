@@ -642,11 +642,6 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
         + ' differ from the candidate ' + JSON.stringify([candidate.issueKey ?? null, candidate.mode ?? null]) + '\n');
       return 17;
     }
-    if (stopped()) {
-      process.stderr.write('START_REFUSED: stopped by ' + stopSignal + ' before the claim\n');
-      return stopCode();
-    }
-
     // 6. Live data, READ-ONLY, before the claim: the same pickup source and the same PR lookup as precheck.
     // Not a single mutation happens here, so a discrepancy leaves no trace in Jira.
     const pk = runNodeScript({ script: pickupScriptOf(env), argv: pickupArgv(project, repo, opt), cwd, env });
@@ -713,8 +708,6 @@ async function start({ args, stateDir, repoKey, cwd, env }) {
     const state = out && typeof out.state === 'string' ? out.state : 'unknown';
     const claimMode = out && typeof out.mode === 'string' ? out.mode : null;
     captured = { issueKey: candidate.issueKey, mode: claimMode !== null ? claimMode : candidate.mode, state };
-
-    if (stopped()) return orphan(stopCode(), 'stopped by ' + stopSignal + ' before the executor started');
 
     // 8. Code 0 is read together with state/mode.
     if (!Object.prototype.hasOwnProperty.call(STARTABLE_CLAIM_STATES, state) || STARTABLE_CLAIM_STATES[state] !== claimMode) {
