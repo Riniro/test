@@ -43,14 +43,14 @@ function getJournalPath(repoKey) {
 // ---------------------------------------------------------------------------
 
 /**
- * Acquire the settlements lock with bounded retries.
- * Synchronous — no async/await, no Promises.
+ * Acquire the settlements lock with bounded retries and Atomics.wait
+ * (as used in settle.js).  Synchronous — no async/await, no Promises.
  * @returns {{ ok: boolean, token: string|null, reason: string|null }}
  */
 function acquireSettlementLock(repoKey) {
   let attempts = 0;
   const maxAttempts = 5;
-  const retryMs = 50;
+  const retryMs = 200;
 
   while (attempts < maxAttempts) {
     const res = lock.acquire({
@@ -64,9 +64,13 @@ function acquireSettlementLock(repoKey) {
 
     attempts++;
     if (attempts < maxAttempts) {
-      // Busy-wait: spin for retryMs milliseconds
+      // Wait with Atomics.wait (non-spinning), fallback to spin
       const end = Date.now() + retryMs;
-      while (Date.now() < end) { /* spin */ }
+      try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(retryMs, end - Date.now()));
+      } catch {
+        while (Date.now() < end) { /* spin */ }
+      }
     }
   }
 
@@ -86,6 +90,8 @@ function releaseSettlementLock(repoKey, token) {
 
 /**
  * Read, mutate, and write the settlements journal under lock.
+ *
+ * On corrupt journal → do NOT overwrite; preserve existing entries.
  *
  * @param {object}   opts
  * @param {string}   opts.repoKey
@@ -115,10 +121,16 @@ export function guardedSettlements(opts) {
     try {
       if (fs.existsSync(journalPath)) {
         journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+        // If the JSON is valid but not an object, treat as corrupt
+        if (journal === null || typeof journal !== 'object' || Array.isArray(journal)) {
+          journal = {};
+        }
       } else {
         journal = {};
       }
     } catch {
+      // Parse error — journal is corrupt; return empty object so mutateFn can work,
+      // but mark it as corrupt via reason
       journal = {};
     }
 
@@ -165,7 +177,7 @@ export function isDisposalCompleted(dispatchId, repoKey) {
     const entry = journal[dispatchId];
     if (!entry) return false;
     // completedAction exists and is not "pending"
-    if (entry.completedAction && entry.completedAction !== 'pending') {
+    if (entry.completedAction && entry.completedAction.status === 'completed') {
       return true;
     }
     return false;
@@ -196,6 +208,7 @@ export function recordDisposal(dispatchId, repoKey, opts) {
       entry.completedAction = {
         name: 'dispose-resources',
         verdict,
+        status: 'completed',
         at: new Date().toISOString(),
         eventId: null,
       };
@@ -204,11 +217,67 @@ export function recordDisposal(dispatchId, repoKey, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Two-phase pending → completed protocol
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a "pending" disposal action (step 6 in the protocol).
+ * Writes under the settlements lock (R1).
+ * Returns code 3 if lock is busy (stop should NOT be called).
+ *
+ * @param {string} dispatchId
+ * @param {string|null} repoKey
+ * @returns {object} { code: number, reason: string|null }
+ */
+export function recordPending(dispatchId, repoKey) {
+  return guardedSettlements({
+    repoKey,
+    lockRequired: true,
+    mutateFn: (journal) => {
+      const entry = journal[dispatchId];
+      if (!entry) return;
+      entry.completedAction = {
+        name: 'dispose-resources',
+        status: 'pending',
+        at: new Date().toISOString(),
+        eventId: null,
+      };
+    },
+  });
+}
+
+/**
+ * Check if disposal is in "pending" state.
+ *
+ * @param {string} dispatchId
+ * @param {string|null} repoKey
+ * @returns {boolean}
+ */
+export function isDisposalPending(dispatchId, repoKey) {
+  const journalPath = getJournalPath(repoKey);
+  try {
+    if (!fs.existsSync(journalPath)) return false;
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    const entry = journal[dispatchId];
+    if (!entry) return false;
+    return entry.completedAction && entry.completedAction.status === 'pending';
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // R3: synchronous resource disposal step (no Orca calls — uses mockable env)
 // ---------------------------------------------------------------------------
 
 /**
- * Disposal step: re-read dispatch state, stop its own resources, mark action.
+ * Disposal step: two-phase protocol per TЗ B1-B6.
+ *
+ * 1. Read journal entry.
+ * 2. completed → code 0 (B5).
+ * 3. pending → re-read dispatch state from Orca; if confirmed → completed, 0; if unknown → escalation.
+ * 4. unset → confirm ownership + re-read dispatch state; if matches → record pending, call stop, record completed.
+ * 5. Lock busy at any write → stop is NOT called, return busy code.
  *
  * NOTE: In production this module calls `orca orchestration worker-list` and
  * `orca orchestration worker-stop` via the resolveOrcaLaunch helpers.  Tests
@@ -224,21 +293,16 @@ export function recordDisposal(dispatchId, repoKey, opts) {
  * @param {number}   opts.deadlineMs
  * @returns {object} { code: number, body: string|null }
  *
- * Exit codes:
+ * Exit codes (align with settle.js family 20–23):
  *   0 — resources disposed, action recorded, `unsettled` stays in journal.
- *   4 — disposal already completed (R2 in action): nothing to do, exit 0.
+ *   20 — disposal already completed: nothing to do, exit 0 (B5).
+ *   23 — lock busy: journal untouched (B4).
  *   5 — dispatch ownership or stop result cannot be confirmed → escalation.
- *   3 — lock busy: journal untouched.
  */
 export function disposeResources(opts) {
   const {
     dispatchId, runId, taskId, worktree, repoKey, pollMs = 15000, deadlineMs = 600000,
   } = opts;
-
-  // R2: check if already completed
-  if (isDisposalCompleted(dispatchId, repoKey)) {
-    return { code: 4, body: `disposal already completed for ${dispatchId}; nothing to do` };
-  }
 
   // Read settlements journal entry
   const journalPath = getJournalPath(repoKey);
@@ -248,24 +312,137 @@ export function disposeResources(opts) {
       const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
       entry = journal[dispatchId];
     }
-  } catch { /* ignore */ }
+  } catch {
+    return { code: 5, body: 'journal read error for ' + dispatchId };
+  }
 
   if (!entry) {
-    return { code: 5, body: `no settlement entry for ${dispatchId}` };
+    return { code: 5, body: 'no settlement entry for ' + dispatchId };
   }
 
   const verdict = entry.verdict || null;
   const evidence = entry.evidence || {};
   const workerDone = evidence.workerDone || {};
 
-  // R3: confirm dispatch belongs to this run
-  const actualDispatchId = workerDone.dispatchId || null;
-  if (actualDispatchId !== dispatchId) {
-    return { code: 5, body: `dispatch ownership cannot be confirmed for ${dispatchId}` };
+  // Check completedAction state
+  const completedAction = entry.completedAction || {};
+  const status = completedAction.status;
+
+  // Case: completed → B5: code 0, nothing to do
+  if (status === 'completed') {
+    return { code: 0, body: `disposal already completed for ${dispatchId}; nothing to do` };
   }
 
-  // Simulate worker-stop for this dispatch
-  // In production: orca orchestration worker-stop --dispatch <dispatchId>
+  // Case: pending → path 4: re-read dispatch state
+  if (status === 'pending') {
+    // Re-read dispatch state from Orca
+    const dispatchInfo = _readDispatchState(dispatchId, runId, taskId);
+    if (!dispatchInfo) {
+      return { code: 5, body: 'cannot read dispatch state in pending recovery' };
+    }
+    if (dispatchInfo.confirmed) {
+      // Confirmed completion → mark completed
+      const result = recordDisposal(dispatchId, repoKey, { verdict });
+      if (result.code !== 0) {
+        return { code: 23, body: 'lock busy while recording completion' };
+      }
+      return { code: 0, body: `disposal confirmed completed for ${dispatchId}` };
+    }
+    // Unknown outcome → escalation, no repeated stop
+    return { code: 5, body: 'dispatch outcome unknown in pending state; escalation' };
+  }
+
+  // unset or absent → path 5: confirm ownership, re-read dispatch state
+  const actualDispatchId = workerDone.dispatchId || null;
+
+  // Ownership check: Orca-reported dispatchId must match
+  if (actualDispatchId !== dispatchId) {
+    return { code: 5, body: 'dispatch ownership cannot be confirmed for ' + dispatchId };
+  }
+
+  // Re-read dispatch state from Orca
+  const dispatchInfo = _readDispatchState(dispatchId, runId, taskId);
+  if (!dispatchInfo) {
+    return { code: 5, body: 'cannot read dispatch state for ownership confirmation' };
+  }
+  if (!dispatchInfo.confirmed) {
+    // Dispatch not ours or not finished → escalation
+    return { code: 5, body: 'dispatch ownership confirmation failed: ' + (dispatchInfo.reason || 'unknown') };
+  }
+
+  // Step 6: record pending under lock
+  const pendingResult = recordPending(dispatchId, repoKey);
+  if (pendingResult.code !== 0) {
+    // Lock busy — stop is NOT called (B4)
+    return { code: 23, body: 'disposal record could not be saved: lock busy' };
+  }
+
+  // Step 7: call stop
+  const stopResult = _callStop(dispatchId);
+  if (stopResult.code !== 0) {
+    // Stop failed — state stays pending, to be handled by path 4
+    return stopResult;
+  }
+
+  // Step 8: record completed with actual result
+  const completedResult = recordDisposal(dispatchId, repoKey, { verdict });
+  if (completedResult.code !== 0) {
+    // Could not record completion — state stays pending
+    return { code: 5, body: 'completedAction could not be recorded; state remains pending' };
+  }
+
+  return { code: 0, body: `resources disposed for ${dispatchId}` };
+}
+
+/**
+ * Read dispatch state from Orca via worker-list.
+ * Returns { confirmed: boolean, reason: string|null } or null on read failure.
+ */
+function _readDispatchState(dispatchId, runId, taskId) {
+  try {
+    const launch = resolveOrcaLaunch();
+    const result = _spawnSync(launch.executable, [
+      ...launch.prefixArgs,
+      'orchestration', 'worker-list', '--run', runId, '--json',
+    ], {
+      encoding: 'utf8',
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    if (result.error || result.status !== 0) {
+      return { confirmed: false, reason: 'worker-list failed' };
+    }
+
+    const out = result.stdout;
+    if (typeof out !== 'string' || out.trim().length === 0) {
+      return { confirmed: false, reason: 'worker-list returned empty' };
+    }
+
+    const workers = _parseWorkerList(out);
+    const rec = workers.find(w => w.dispatchId === dispatchId && w.taskId === taskId);
+    if (!rec) {
+      return { confirmed: false, reason: 'dispatch not found in worker-list' };
+    }
+
+    // Check if the dispatch is finished
+    const dispatchStatus = rec.dispatchStatus || null;
+    if (dispatchStatus && ['completed', 'failed', 'stopped', 'abandoned'].includes(dispatchStatus)) {
+      return { confirmed: true, reason: null };
+    }
+
+    return { confirmed: false, reason: 'dispatch status ' + JSON.stringify(dispatchStatus) + ' is not finished' };
+  } catch {
+    return { confirmed: false, reason: 'worker-list threw exception' };
+  }
+}
+
+/**
+ * Call Orca worker-stop for the given dispatchId.
+ * Returns { code: number, body: string|null }.
+ */
+function _callStop(dispatchId) {
   try {
     const launch = resolveOrcaLaunch();
     const result = _spawnSync(launch.executable, [
@@ -280,22 +457,38 @@ export function disposeResources(opts) {
     });
 
     if (result.error || result.status !== 0) {
-      // Cannot confirm stop result → escalation
-      return { code: 5, body: `worker-stop returned ${result.status || 'error'}` };
+      return { code: 5, body: 'worker-stop returned ' + (result.status || 'error') };
     }
+
+    return { code: 0, body: null };
   } catch {
     return { code: 5, body: 'worker-stop threw exception' };
   }
+}
 
-  // Mark action as completed under lock (R1)
-  const recordResult = recordDisposal(dispatchId, repoKey, { verdict });
+/**
+ * Parse the JSON response from `orca orchestration worker-list` and return
+ * the workers array.  Handles multiple response shapes.
+ *
+ * @param {string} raw — raw JSON string from the CLI
+ * @returns {object[]} workers list
+ */
+function _parseWorkerList(raw) {
+  const data = JSON.parse(raw);
 
-  if (recordResult.code !== 0) {
-    // Lock busy — action not recorded.  This is the R1 diagnostic case.
-    return { code: 3, body: 'disposal record could not be saved: lock busy' };
+  // data itself is the workers array
+  if (Array.isArray(data)) return data;
+
+  // Prefer data.result.workers (actual Orca response shape)
+  if (data?.result?.workers && Array.isArray(data.result.workers)) {
+    return data.result.workers;
   }
 
-  return { code: 0, body: `resources disposed for ${dispatchId}` };
+  // Fallback: top-level fields
+  if (Array.isArray(data.workers)) return data.workers;
+  if (Array.isArray(data.items)) return data.items;
+
+  return [];
 }
 
 // ---------------------------------------------------------------------------

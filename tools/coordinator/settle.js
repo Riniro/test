@@ -385,6 +385,11 @@ function watch(args) {
           recordedAt: new Date().toISOString(),
         };
 
+        // B1: preserve completedAction when rewriting the entry
+        if (existingEntry && existingEntry.completedAction) {
+          entry.completedAction = existingEntry.completedAction;
+        }
+
         journal[args.dispatch] = entry;
       }
     },

@@ -244,20 +244,20 @@ test('R3: no settlement entry → code 5 (escalation)', async () => {
 // R3: disposeResources with completedAction → code 4 (already done)
 // ---------------------------------------------------------------------------
 
-test('R3: completedAction already present → code 4', async () => {
+test('R3: completedAction status=completed → code 0 (B5)', async () => {
   const { stateDir, cleanup } = makeStateDir();
   after(cleanup);
   process.env.COORDINATOR_STATE_DIR = stateDir;
 
   try {
-    // Create a journal entry with completedAction
+    // Create a journal entry with completedAction status=completed
     guard.guardedSettlements({
       repoKey: 'default',
       lockRequired: true,
       mutateFn: (journal) => {
         journal['ctx-r3'] = {
           verdict: 'SETTLED_BY_WORKER',
-          completedAction: { name: 'dispose-resources', at: new Date().toISOString() },
+          completedAction: { name: 'dispose-resources', status: 'completed', at: new Date().toISOString() },
         };
       },
     });
@@ -270,7 +270,8 @@ test('R3: completedAction already present → code 4', async () => {
       repoKey: 'default',
     });
 
-    assert.equal(result.code, 4, 'should return 4 for already completed');
+    assert.equal(result.code, 0, 'should return 0 for already completed (B5)');
+    assert.ok(result.body.includes('nothing to do'));
   } finally {
     delete process.env.COORDINATOR_STATE_DIR;
   }
@@ -338,11 +339,26 @@ test('R3: disposeResources with stub → code 0, action recorded', async () => {
       },
     });
 
-    // Create an Orca stub that succeeds on worker-stop
+    // Create an Orca stub that:
+    // 1. Returns worker-list with the dispatchId and a finished status for ownership confirmation
+    // 2. Accepts worker-stop with success
     const stubDir = join(stateDir, 'ora-stub');
     mkdirSync(stubDir, { recursive: true });
     const stubPath = join(stubDir, 'ora-stub.js');
-    writeFileSync(stubPath, 'process.exit(0);', 'utf8');
+    writeFileSync(stubPath, `
+      import { parseArgs } from 'node:util';
+      const argv = process.argv.slice(2);
+      // argv = ['orchestration', 'worker-list'|'worker-stop', ...flags]
+      const subCmd = argv.length > 1 ? argv[1] : '';
+      if (subCmd === 'worker-list') {
+        // Return a finished dispatch for ownership confirmation
+        process.stdout.write(JSON.stringify({
+          result: { workers: [{ dispatchId: 'ctx-ora', taskId: 'task-ora', dispatchStatus: 'stopped' }] }
+        }) + '\\n');
+      }
+      // worker-stop or anything else: success
+      process.exit(0);
+    `, 'utf8');
     process.env.SETTLE_ORCA_EXEC = process.execPath;
     process.env.SETTLE_ORCA_PREFIX_ARGS_JSON = JSON.stringify([stubPath]);
 
@@ -363,6 +379,7 @@ test('R3: disposeResources with stub → code 0, action recorded', async () => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
       assert.ok(journal['ctx-ora'].completedAction);
       assert.equal(journal['ctx-ora'].completedAction.name, 'dispose-resources');
+      assert.equal(journal['ctx-ora'].completedAction.status, 'completed');
     } finally {
       delete process.env.SETTLE_ORCA_EXEC;
       delete process.env.SETTLE_ORCA_PREFIX_ARGS_JSON;
@@ -395,11 +412,25 @@ test('R3: disposeResources failing stub → code 5 (escalation)', async () => {
       },
     });
 
-    // Create a failing Orca stub
+    // Create a failing Orca stub — returns finished status for worker-list but fails on worker-stop
     const stubDir = join(stateDir, 'ora-fail');
     mkdirSync(stubDir, { recursive: true });
     const stubPath = join(stubDir, 'ora-fail.js');
-    writeFileSync(stubPath, 'process.exit(1);', 'utf8');
+    writeFileSync(stubPath, `
+      const argv = process.argv.slice(2);
+      // argv = ['orchestration', 'worker-list'|'worker-stop', ...flags]
+      const subCmd = argv.length > 1 ? argv[1] : '';
+      if (subCmd === 'worker-list') {
+        // Return a finished dispatch so ownership confirms
+        process.stdout.write(JSON.stringify({
+          result: { workers: [{ dispatchId: 'ctx-fail', taskId: 'task-fail', dispatchStatus: 'stopped' }] }
+        }) + '\\n');
+      } else {
+        // worker-stop: fail
+        process.stderr.write('worker-stop failed\\n');
+        process.exit(1);
+      }
+    `, 'utf8');
     process.env.SETTLE_ORCA_EXEC = process.execPath;
     process.env.SETTLE_ORCA_PREFIX_ARGS_JSON = JSON.stringify([stubPath]);
 
@@ -413,7 +444,7 @@ test('R3: disposeResources failing stub → code 5 (escalation)', async () => {
       });
 
       assert.equal(result.code, 5, 'should fail with failing stub');
-      assert.ok(result.body.includes('worker-stop'));
+      assert.ok(result.body.includes('worker-stop'), 'should mention worker-stop in body');
     } finally {
       delete process.env.SETTLE_ORCA_EXEC;
       delete process.env.SETTLE_ORCA_PREFIX_ARGS_JSON;
