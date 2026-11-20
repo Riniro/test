@@ -100,9 +100,34 @@ function _readRecord(filePath) {
     return { ok: true, raw };
   } catch (err) {
     if (err.code === 'ENOENT') {
+      // "No record" is only an honest answer when the path can lead to one. A component that is a file makes
+      // the state location itself broken: Linux says ENOTDIR for it and Windows says ENOENT, so the platform
+      // error is not trusted here, the path is checked. Same answer on both: the state cannot be determined.
+      const blocker = _fileOnPath(filePath);
+      if (blocker !== null) {
+        return { ok: false, reason: 'READ_ERROR', detail: 'a component of the journal path is not a directory: ' + blocker };
+      }
       return { ok: false, reason: 'MISSING' };
     }
     return { ok: false, reason: 'READ_ERROR', detail: err.message };
+  }
+}
+
+/** The nearest existing ancestor of filePath that is not a directory, or null. Plain absence is not a blocker. */
+function _fileOnPath(filePath) {
+  let dir = path.dirname(filePath);
+  for (;;) {
+    try {
+      return fs.statSync(dir).isDirectory() ? null : dir;
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        const parent = path.dirname(dir);
+        if (parent === dir) return null;
+        dir = parent;
+        continue;
+      }
+      return dir; // ENOTDIR, EACCES, ...: the path cannot be vouched for
+    }
   }
 }
 

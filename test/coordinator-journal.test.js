@@ -571,3 +571,45 @@ test('claimAttempt: a journal of the previous format (no claimAttempt) reads as 
   assert.equal(write({ stateDir, repoKey, patch: { claimAttempt: ORPHAN } }).ok, true);
   assert.deepStrictEqual(read({ stateDir, repoKey }).record.claimAttempt, ORPHAN);
 });
+
+// B2: Linux answers ENOTDIR where Windows answers ENOENT for a path that goes through a file. The classification
+// must not follow the platform: a path through a file is "the state cannot be determined", a path that merely
+// does not exist yet is "no record". The error source is replaced, so these run the same on every platform.
+function readWithFsError(code, repoKey) {
+  const original = fs.readFileSync;
+  fs.readFileSync = () => { throw Object.assign(new Error(`${code}: simulated`), { code }); };
+  try {
+    return read({ stateDir: path.join(stateDir, 'b2-nowhere'), repoKey });
+  } finally {
+    fs.readFileSync = original;
+  }
+}
+
+test('B2: ENOENT on a path that merely does not exist yet is "no record" (MISSING)', () => {
+  assert.deepStrictEqual(readWithFsError('ENOENT', 'b2-a'), { ok: false, reason: 'MISSING' });
+});
+
+test('B2: ENOENT while a component of the path is a FILE is not "no record" (the Windows form of ENOTDIR)', () => {
+  const blocker = path.join(stateDir, 'b2-file-as-dir');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(blocker, 'x');
+  const original = fs.readFileSync;
+  fs.readFileSync = () => { throw Object.assign(new Error('ENOENT: simulated'), { code: 'ENOENT' }); };
+  try {
+    const r = read({ stateDir: blocker, repoKey: 'b2-b' });
+    assert.equal(r.ok, false);
+    assert.notEqual(r.reason, 'MISSING');
+    assert.equal(r.reason, 'CORRUPT');
+    assert.match(r.detail, /not a directory/);
+  } finally {
+    fs.readFileSync = original;
+  }
+});
+
+for (const code of ['ENOTDIR', 'EACCES', 'EPERM', 'EIO']) {
+  test(`B2: a read that fails with ${code} is "cannot be determined", never "no record"`, () => {
+    const r = readWithFsError(code, 'b2-c-' + code);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'CORRUPT');
+  });
+}

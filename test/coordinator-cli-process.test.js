@@ -517,13 +517,64 @@ for (const [pkCode, pkOut] of [[3, '{"work":false,"reason":"none","issue":null}'
   });
 }
 
-test('R1: the candidate cannot be saved (state dir is a file) → precheck 5', (t) => {
+test('R1: the journal reads normally ("no candidate yet") and only the SAVE fails → precheck 5, no candidate', (t) => {
+  const c = newCase('cli-pc-');
+  t.after(c.cleanup);
+  // A valid journal without a candidate; the backup path is taken by a directory, so the atomic write
+  // (the backup of the existing record) fails while every read answers normally.
+  seedPatch(c.scratch, c.stateDir, { issueKey: 'KAN-OLD' });
+  const dir = path.join(c.stateDir, repoKeyOf(c.scratch));
+  fs.rmSync(path.join(dir, 'journal.bak.json'), { force: true });
+  fs.mkdirSync(path.join(dir, 'journal.bak.json'));
+  const r = runCliEnv(PRECHECK_ARGS, c.stateDir, precheckEnv(c.scratch, {}));
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stderr, /candidate was not saved/);
+  const rec = readRecord(c.scratch, c.stateDir);
+  assert.ok(!rec.unreadable, 'the journal is still readable');
+  assert.equal(rec.candidate, null, 'the candidate was not written');
+  assert.equal(rec.issueKey, 'KAN-OLD');
+});
+
+// The state dir is a file: the journal path goes through a file. Linux reads ENOTDIR, Windows ENOENT; the application
+// answers the same on both (B2): the state cannot be determined, 10, before anything is asked or written.
+// This is a refusal of its own, not a failed save (5): see the test above for that.
+test('R1/B2: the state dir is a file → precheck 10 (not 5, not 0), no source asked, the file is untouched', (t) => {
   const scratch = mkTmp('cli-pc-scratch-');
   t.after(() => rmTmp(scratch));
   const stateDir = path.join(scratch, 'state-is-a-file');
   fs.writeFileSync(stateDir, 'not a directory');
-  const r = runCliEnv(PRECHECK_ARGS, stateDir, precheckEnv(scratch, {}));
-  assert.equal(r.status, 5, r.stdout + r.stderr);
+  const env = precheckEnv(scratch, {});
+  const r = runCliEnv(PRECHECK_ARGS, stateDir, env);
+  assert.equal(r.status, 10, r.stdout + r.stderr);
+  assert.match(r.stderr, /PRECHECK_REFUSED: the journal cannot be read/);
+  assert.ok(!fs.existsSync(env.GH_LOG), 'no PR lookup');
+  assert.equal(fs.readFileSync(stateDir, 'utf8'), 'not a directory');
+});
+
+test('R1/B2: the state dir is a file → clear-orphan is 10 and never reports "nothing to clear"; status is 10', (t) => {
+  const scratch = mkTmp('cli-pc-scratch-');
+  t.after(() => rmTmp(scratch));
+  const stateDir = path.join(scratch, 'state-is-a-file');
+  fs.writeFileSync(stateDir, 'not a directory');
+  const r = runCliEnv(CLEAR(), stateDir, withSecrets({}));
+  assert.equal(r.status, 10, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /NO_ORPHANED_CLAIM|ORPHAN_CLEARED/);
+  assert.match(r.stderr, /CLEAR_ORPHAN_REFUSED/);
+  assert.equal(runCliEnv(['status'], stateDir).status, 10);
+});
+
+test('R1/B2: the state dir is a file → start does not run the executor (same on every platform)', (t) => {
+  const c = newCase();
+  t.after(c.cleanup);
+  const env = prepareRoute(c.scratch, c.stateDir);
+  const scratch = mkTmp('cli-pc-scratch-');
+  t.after(() => rmTmp(scratch));
+  const stateFile = path.join(scratch, 'state-is-a-file');
+  fs.writeFileSync(stateFile, 'not a directory');
+  const r = runCliEnv(['start', ...ROUTE_FLAGS(), '--', process.execPath, c.child], stateFile, withSecrets(env));
+  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  assert.ok(!fs.existsSync(c.marker), 'no executor');
+  assert.equal(claimCalls(c.scratch).length, 0, 'the gate was not called');
 });
 
 test('R1: precheck does not touch an existing accepted result', (t) => {
@@ -1708,10 +1759,16 @@ for (const [name, damage] of UNREADABLE_JOURNALS) {
     const env = prepareRoute(c.scratch, c.stateDir);
     const jf = path.join(c.stateDir, repoKeyOf(c.scratch), 'journal.json');
     damage(jf);
+    const snapshot = () => fs.statSync(jf).isDirectory() ? 'DIR' : fs.readFileSync(jf, 'utf8');
+    const damaged = snapshot();
+    const dirFiles = fs.readdirSync(path.dirname(jf)).sort();
     for (const f of [env.PK_LOG, env.GH_LOG]) fs.rmSync(f, { force: true });
     const pre = runCliEnv(PRECHECK_ARGS, c.stateDir, withSecrets({ ...precheckEnv(c.scratch, {}), PK_LOG: env.PK_LOG }));
     assert.equal(pre.status, 10, pre.stdout + pre.stderr);
     assert.ok(!fs.existsSync(env.PK_LOG) && !fs.existsSync(env.GH_LOG), 'precheck asked no source');
+    assert.equal(snapshot(), damaged, 'no candidate was written: the journal is byte-for-byte as it was');
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(jf)).sort(), dirFiles, 'no file was added next to the journal');
+    assert.doesNotMatch(pre.stdout, /"candidate"/, 'no candidate was reported');
     const st = runStart(c, withSecrets(env));
     assertRefused(st, { code: 10, marker: c.marker, stateDir: c.stateDir });
     assert.equal(claimCalls(c.scratch).length, 0, 'the gate was not called');
