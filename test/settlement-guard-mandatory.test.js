@@ -423,6 +423,29 @@ test('обрыв после остановки: исход неизвестен 
 // 8. Ordinary interruption releases the lock
 // ---------------------------------------------------------------------------
 
+// The POSIX test below sends a real SIGTERM.  Windows cannot deliver one to a
+// Node handler, so this test drives the same handler through the signal event
+// itself: it proves the handler is registered and releases the lock, on every
+// platform, and leaves real delivery to the test after it.
+test('обработчик сигнала зарегистрирован и освобождает блокировку', async (t) => {
+  const box = sandbox(t, []);
+  const lockDir = join(box.stateDir, 'settlements-guard', 'lock');
+
+  const script = join(box.dir, 'emit-signal.js');
+  writeFileSync(script, [
+    'import { acquireSettlementLock } from ' + JSON.stringify(GUARD_URL) + ';',
+    'const res = acquireSettlementLock(null);',
+    'if (!res.ok) process.exit(9);',
+    'setTimeout(() => { process.emit("SIGTERM"); }, 50);',
+    'setTimeout(() => { process.exit(7); }, 3000);',
+  ].join(NL), 'utf8');
+
+  const child = spawn(process.execPath, [script], { env: box.env });
+  await new Promise((resolve) => child.on('exit', resolve));
+
+  assert.equal(existsSync(lockDir), false, 'обработчик сигнала не освободил блокировку');
+});
+
 test('SIGTERM удерживающему процессу освобождает блокировку', {
   skip: process.platform === 'win32'
     ? 'Windows не доставляет SIGTERM обработчику Node; там восстановление операторское, см. RECOVERY_AFTER_CRASH'
