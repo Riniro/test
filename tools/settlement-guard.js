@@ -277,10 +277,12 @@ export function recordDisposal(dispatchId, repoKey, opts) {
       const entry = journal[dispatchId];
       if (!entry) return;
       entryFound = true;
+      const held = entry.completedAction || {};
       entry.completedAction = {
         name: 'dispose-resources',
         verdict,
         status: 'completed',
+        trigger: held.trigger || null,
         at: new Date().toISOString(),
         eventId: null,
       };
@@ -331,6 +333,68 @@ export function recordPending(dispatchId, repoKey, opts = {}) {
     return { code: CODE_ESCALATE, journal: null, reason: 'NO_ENTRY' };
   }
   return res;
+}
+
+// Outcomes of a disposal claim.  Exactly one process can be granted the right
+// to call worker-stop for a dispatch; the others are told who holds it.
+export const CLAIM_GRANTED = 'granted';
+export const CLAIM_ALREADY_COMPLETED = 'already-completed';
+export const CLAIM_HELD_BY_OTHER = 'held-by-other';
+
+/**
+ * Decide and record, under ONE hold of the lock, whether this process may call
+ * worker-stop for a dispatch.
+ *
+ * Reading the state and writing the intent must not be two separate steps: in
+ * between, another process can read the same "nothing recorded yet" and the
+ * stop is sent twice.  So the entry is re-read inside the mutation and the
+ * intent is written only when nothing is there — an existing `pending` or
+ * `completed` is never overwritten.
+ *
+ * @returns {{ code: number, claim: string|null, reason: string|null }}
+ *   claim CLAIM_GRANTED           — this process wrote the intent and may stop.
+ *   claim CLAIM_ALREADY_COMPLETED — someone already finished; nothing to do.
+ *   claim CLAIM_HELD_BY_OTHER     — another process holds the intent; do not stop.
+ */
+export function claimDisposal(dispatchId, repoKey, opts = {}) {
+  let claim = null;
+  let detail = null;
+
+  const res = guardedSettlements({
+    repoKey,
+    lockRequired: true,
+    mutateFn: (journal) => {
+      const entry = journal[dispatchId];
+      if (!entry) { claim = 'no-entry'; return; }
+
+      const existing = entry.completedAction;
+      const status = existing ? existing.status : undefined;
+
+      if (status === 'completed') { claim = CLAIM_ALREADY_COMPLETED; return; }
+      if (status === 'pending') { claim = CLAIM_HELD_BY_OTHER; return; }
+      if (existing) { claim = 'unknown-status'; detail = JSON.stringify(status); return; }
+
+      entry.completedAction = {
+        name: 'dispose-resources',
+        status: 'pending',
+        trigger: opts.trigger || null,
+        at: new Date().toISOString(),
+        eventId: null,
+      };
+      claim = CLAIM_GRANTED;
+    },
+  });
+
+  if (res.code !== CODE_OK) {
+    return { code: res.code, claim: null, reason: res.reason };
+  }
+  if (claim === 'no-entry') {
+    return { code: CODE_ESCALATE, claim: null, reason: 'NO_ENTRY' };
+  }
+  if (claim === 'unknown-status') {
+    return { code: CODE_ESCALATE, claim: null, reason: 'UNKNOWN_STATUS ' + detail };
+  }
+  return { code: CODE_OK, claim, reason: null };
 }
 
 /**
@@ -474,15 +538,28 @@ export function disposeResources(opts) {
     };
   }
 
-  // Step 6: record the intent under lock.  If it cannot be saved, the stop is
-  // not called at all (B4).
-  const pendingResult = recordPending(dispatchId, repoKey, {
+  // Step 6: claim the right to stop.  The decision and the record of the
+  // intent happen under one hold of the lock, so two processes racing for the
+  // same dispatch cannot both be granted it.  If the intent cannot be saved,
+  // the stop is not called at all (B4).
+  const claimed = claimDisposal(dispatchId, repoKey, {
     trigger: ownership.finished ? 'result' : 'deadline',
   });
-  if (pendingResult.code !== CODE_OK) {
+  if (claimed.code !== CODE_OK) {
     return {
-      code: pendingResult.code,
-      body: 'disposal intent could not be saved (' + pendingResult.reason + '); worker-stop was not called',
+      code: claimed.code,
+      body: 'disposal intent could not be saved (' + claimed.reason + '); worker-stop was not called',
+    };
+  }
+  if (claimed.claim === CLAIM_ALREADY_COMPLETED) {
+    return { code: CODE_OK, body: `disposal already completed for ${dispatchId}; nothing to do` };
+  }
+  if (claimed.claim === CLAIM_HELD_BY_OTHER) {
+    // Another process wrote the intent first.  Only the process that wrote it
+    // may send the command, so this one stops here and touches nothing.
+    return {
+      code: CODE_LOCK_BUSY,
+      body: 'disposal for ' + dispatchId + ' is already in progress elsewhere; worker-stop was not called',
     };
   }
 

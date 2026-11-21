@@ -21,16 +21,25 @@ const SETTLE = join(ROOT, 'tools', 'coordinator', 'settle.js');
 const GUARD_URL = pathToFileURL(join(ROOT, 'tools', 'settlement-guard.js')).href;
 const NL = String.fromCharCode(10);
 
+// The stub answers worker-list only for the run it was asked about, so a
+// caller that does not scope its query to its own run gets nothing back.
 const STUB_SOURCE = [
   "import fs from 'node:fs';",
   'const args = process.argv.slice(2);',
   'fs.appendFileSync(process.env.STUB_LOG, args.join(" ") + String.fromCharCode(10));',
   'const cfg = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, "utf8"));',
   'if (args.includes("worker-list")) {',
-  '  process.stdout.write(JSON.stringify({ ok: true, result: { workers: cfg.workers || [] } }));',
+  '  const i = args.indexOf("--run");',
+  '  const asked = i >= 0 ? args[i + 1] : null;',
+  '  const mine = asked === (cfg.run || "run_mandatory");',
+  '  process.stdout.write(JSON.stringify({ ok: true, result: { workers: mine ? (cfg.workers || []) : [] } }));',
   '  process.exit(0);',
   '}',
-  'if (args.includes("worker-stop")) { process.exit(cfg.stopExit || 0); }',
+  'if (args.includes("worker-stop")) {',
+  '  const holdMs = cfg.stopHoldMs || 0;',
+  '  if (holdMs) { const end = Date.now() + holdMs; while (Date.now() < end) {} }',
+  '  process.exit(cfg.stopExit || 0);',
+  '}',
   'process.exit(0);',
 ].join(NL);
 
@@ -72,6 +81,9 @@ function sandbox(t, workers, stopExit) {
         workers: next,
         stopExit: nextStopExit === undefined ? (stopExit || 0) : nextStopExit,
       }), 'utf8');
+    },
+    setConfig(cfg) {
+      writeFileSync(configPath, JSON.stringify(cfg), 'utf8');
     },
     stopCalls() {
       return readFileSync(logPath, 'utf8').split(NL)
@@ -417,6 +429,143 @@ test('обрыв после остановки: исход неизвестен 
   assert.match(r.stdout, /the stop is not repeated/);
   assert.equal(box.stopCalls(), 0);
   assert.equal(box.journal()[DISPATCH].completedAction.status, 'pending');
+});
+
+// ---------------------------------------------------------------------------
+// 7a. Two real CLI processes racing for the same dispatch
+// ---------------------------------------------------------------------------
+
+// This stub holds every caller at a barrier until both have asked for the
+// worker list, so the two processes reach the claim at the same moment rather
+// than by luck of scheduling.  worker-stop then takes long enough that the
+// loser's attempt certainly falls inside the winner's stop.
+const BARRIER_STUB_SOURCE = [
+  "import fs from 'node:fs';",
+  "import path from 'node:path';",
+  'const args = process.argv.slice(2);',
+  'fs.appendFileSync(process.env.STUB_LOG, args.join(" ") + String.fromCharCode(10));',
+  'const cfg = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, "utf8"));',
+  'if (args.includes("worker-list")) {',
+  '  const mark = process.env.STUB_BARRIER;',
+  '  const dir = path.dirname(mark);',
+  '  const base = path.basename(mark);',
+  '  fs.writeFileSync(mark + "." + process.pid, "x");',
+  '  const deadline = Date.now() + 5000;',
+  '  while (Date.now() < deadline) {',
+  '    const seen = fs.readdirSync(dir).filter((f) => f.startsWith(base + ".")).length;',
+  '    if (seen >= 2) break;',
+  '  }',
+  '  process.stdout.write(JSON.stringify({ ok: true, result: { workers: cfg.workers || [] } }));',
+  '  process.exit(0);',
+  '}',
+  'if (args.includes("worker-stop")) {',
+  '  const end = Date.now() + (cfg.stopHoldMs || 600);',
+  '  while (Date.now() < end) {}',
+  '  process.exit(0);',
+  '}',
+  'process.exit(0);',
+].join(NL);
+
+test('два параллельных CLI по одному dispatch: ровно одна остановка, completed сохранён', async (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+  assert.equal(box.stopCalls(), 0);
+
+  const barrierStub = join(box.dir, 'barrier-stub.js');
+  writeFileSync(barrierStub, BARRIER_STUB_SOURCE, 'utf8');
+  const barrierDir = join(box.dir, 'barrier');
+  mkdirSync(barrierDir, { recursive: true });
+
+  box.setConfig({ workers: [worker(DISPATCH, TASK, 'succeeded', 'succeeded')], stopHoldMs: 600 });
+
+  const raceEnv = {
+    ...box.env,
+    SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([barrierStub]),
+    STUB_BARRIER: join(barrierDir, 'arrived'),
+  };
+
+  const args = [CLI, 'dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK];
+  const codes = await Promise.all([0, 1].map(() => new Promise((resolve) => {
+    const child = spawn(process.execPath, args, { env: raceEnv });
+    child.on('exit', (code) => resolve(code));
+  })));
+
+  assert.equal(box.stopCalls(), 1,
+    'worker-stop вызван ' + box.stopCalls() + ' раз(а) при двух параллельных запусках');
+
+  const entry = box.journal()[DISPATCH];
+  assert.equal(entry.completedAction.status, 'completed',
+    'после гонки отметка не в состоянии completed: ' + JSON.stringify(entry.completedAction));
+
+  // Exactly one process may have been granted the right to stop; the other
+  // must have refused to send the command.
+  assert.ok(codes.includes(0), 'ни один процесс не завершился успешно: ' + JSON.stringify(codes));
+  assert.equal(codes.filter((c) => c === 0 || c === 23).length, 2,
+    'неожиданные коды выхода: ' + JSON.stringify(codes));
+});
+
+// ---------------------------------------------------------------------------
+// 7b. settle.js keeps a pending intent, not only a completed one
+// ---------------------------------------------------------------------------
+
+test('settle.js сохраняет pending при смене вердикта', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  const journal = box.journal();
+  const firstVerdict = journal[DISPATCH].verdict;
+  journal[DISPATCH].completedAction = {
+    name: 'dispose-resources', status: 'pending', trigger: 'result',
+    at: new Date().toISOString(), eventId: null,
+  };
+  box.writeJournal(journal);
+
+  box.setWorkers([]);
+  const second = runSettle(box, settleArgs(box));
+  assert.ok([0, 20, 21, 22].includes(second.status), second.stdout + second.stderr);
+
+  const entry = box.journal()[DISPATCH];
+  assert.notEqual(entry.verdict, firstVerdict, 'вердикт должен был смениться');
+  assert.ok(entry.completedAction, 'pending стёрт перезаписью наблюдения');
+  assert.equal(entry.completedAction.status, 'pending');
+});
+
+// ---------------------------------------------------------------------------
+// 7c. Ownership is confirmed by run, dispatchId and taskId, each on its own
+// ---------------------------------------------------------------------------
+
+test('принадлежность: в списке запуска другой dispatchId при том же taskId', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  box.setWorkers([worker('ctx_another', TASK, 'succeeded', 'succeeded')]);
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /not in the worker list/);
+  assert.equal(box.stopCalls(), 0);
+});
+
+test('принадлежность: в списке запуска тот же dispatchId при другом taskId', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  box.setWorkers([worker(DISPATCH, 'task_another', 'succeeded', 'succeeded')]);
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /not in the worker list/);
+  assert.equal(box.stopCalls(), 0);
+});
+
+test('принадлежность: запрос списка идёт по своему запуску', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  // The stub answers only for RUN.  Asking about another run must leave the
+  // dispatch unconfirmed — which only happens if --run is really passed on.
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', 'run_someone_else', '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /not in the worker list of run run_someone_else/);
+  assert.equal(box.stopCalls(), 0);
 });
 
 // ---------------------------------------------------------------------------
