@@ -12,6 +12,9 @@ import os from 'node:os';
 
 import { decide } from './settlement.js';
 
+// Settlement journal lock helpers — re-exported from the guard module.
+import { guardedSettlements } from '../settlement-guard.js';
+
 // ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
@@ -351,39 +354,84 @@ function watch(args) {
     recommendedRecovery = `orca orchestration worker-show --dispatch ${args.dispatch}`;
   }
 
-  // Determine alreadyRecorded
-  const journalPath = getJournalPath(args.repoKey);
-  const journal = readJournal(journalPath);
+  // Determine alreadyRecorded — done under the settlements lock (R1).
+  // guardedSettlements wraps the full read→mutate→write cycle.
   let alreadyRecorded = false;
-  const existingEntry = journal[args.dispatch];
 
-  if (existingEntry && existingEntry.verdict === verdictResult.verdict) {
-    alreadyRecorded = true;
-  } else if (existingEntry && existingEntry.verdict !== verdictResult.verdict) {
-    alreadyRecorded = false;
-    verdictResult.reasons.push('VERDICT_CHANGED');
+  const guardResult = guardedSettlements({
+    repoKey: args.repoKey,
+    lockRequired: true,
+    mutateFn: (journal) => {
+      let existingEntry = null;
+      try {
+        existingEntry = journal[args.dispatch];
+      } catch { /* ignore */ }
+
+      if (existingEntry && existingEntry.verdict === verdictResult.verdict) {
+        alreadyRecorded = true;
+      } else if (existingEntry && existingEntry.verdict !== verdictResult.verdict) {
+        alreadyRecorded = false;
+        verdictResult.reasons.push('VERDICT_CHANGED');
+      }
+
+      if (!alreadyRecorded) {
+        // Record to journal under lock — only when not already recorded
+        const entry = {
+          ...verdictResult,
+          evidence,
+          deadlineExceeded,
+          recommendedRecovery,
+          alreadyRecorded,
+          recordedAt: new Date().toISOString(),
+        };
+
+        // B1: preserve completedAction when rewriting the entry
+        if (existingEntry && existingEntry.completedAction) {
+          entry.completedAction = existingEntry.completedAction;
+        }
+
+        journal[args.dispatch] = entry;
+      }
+    },
+  });
+
+  if (guardResult.code !== 0) {
+    // The journal was not touched: busy (23), corrupt (24) or an I/O error
+    // (25).  Each keeps its own code so the caller knows which it was, and a
+    // corrupt journal is reported, never rewritten.
+    const entry = {
+      ...verdictResult,
+      evidence,
+      deadlineExceeded,
+      recommendedRecovery,
+      journalNotWritten: guardResult.reason,
+      recordedAt: new Date().toISOString(),
+    };
+    if (guardResult.reason === 'LOCK_BUSY') entry.lockBusy = true;
+    if (guardResult.reason === 'CORRUPT') entry.journalCorrupt = true;
+    process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+    return guardResult.code;
   }
 
-  // Record to journal
-  const entry = {
-    ...verdictResult,
-    evidence,
-    deadlineExceeded,
-    recommendedRecovery,
-    alreadyRecorded,
-    recordedAt: new Date().toISOString(),
-  };
-
-  if (!alreadyRecorded) {
-    journal[args.dispatch] = entry;
-    writeJournal(journalPath, journal);
+  // Print the entry (alreadyRecorded flag is set correctly in mutateFn)
+  // If alreadyRecorded=true, the journal was not modified (to keep file
+  // unchanged), so we rebuild the output entry with the correct flag.
+  let entryForOutput;
+  if (alreadyRecorded) {
+    entryForOutput = {
+      ...verdictResult,
+      evidence,
+      deadlineExceeded,
+      recommendedRecovery,
+      alreadyRecorded: true,
+      recordedAt: new Date().toISOString(),
+    };
+  } else {
+    entryForOutput = guardResult.journal[args.dispatch];
   }
-
-  // If already recorded, set the flag in the output
-  entry.alreadyRecorded = alreadyRecorded;
 
   // Print exactly one JSON object to stdout
-  process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+  process.stdout.write(JSON.stringify(entryForOutput, null, 2) + '\n');
 
   return exitCode;
 }
