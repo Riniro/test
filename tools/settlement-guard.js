@@ -32,10 +32,71 @@ import * as lock from './coordinator/lock.js';
  */
 const SETTLEMENTS_LOCK_KEY = 'settlements-guard';
 
+// Result codes.  The busy code is the SAME everywhere busy is reported — in
+// this module, in settle.js and in the CLI — so that a caller never has to
+// know which layer refused (B6).
+export const CODE_OK = 0;
+export const CODE_ESCALATE = 5;
+export const CODE_LOCK_BUSY = 23;
+export const CODE_JOURNAL_CORRUPT = 24;
+export const CODE_IO_ERROR = 25;
+
+function stateDirPath() {
+  return process.env.COORDINATOR_STATE_DIR || join(os.homedir(), '.claude-coordinator');
+}
+
 function getJournalPath(repoKey) {
-  const stateDir = process.env.COORDINATOR_STATE_DIR || join(os.homedir(), '.claude-coordinator');
   const repo = repoKey || 'default';
-  return join(stateDir, repo, 'settlements.json');
+  return join(stateDirPath(), repo, 'settlements.json');
+}
+
+// ---------------------------------------------------------------------------
+// Signal safety
+// ---------------------------------------------------------------------------
+//
+// While this process holds the settlements lock, SIGINT and SIGTERM are
+// intercepted so that an ordinary interruption releases the lock instead of
+// leaving it behind.  The handlers are installed only while a lock is held and
+// removed as soon as the last one is released, so importing this module does
+// not change the signal behaviour of a process that is not writing.
+//
+// Not covered: a stop that cannot run JavaScript at all (SIGKILL, a hard
+// reset, a lost machine).  See RECOVERY_AFTER_CRASH at the end of this file —
+// recovery there is a deliberate operator action, never an automatic release
+// of a lock that may still belong to a living process.
+
+const heldLocks = new Set();
+const SIGNALS = ['SIGINT', 'SIGTERM'];
+const signalHandlers = new Map();
+
+function releaseAllHeldLocks() {
+  for (const token of [...heldLocks]) {
+    try {
+      lock.release({ stateDir: stateDirPath(), repoKey: SETTLEMENTS_LOCK_KEY, token });
+    } catch { /* best effort: we are on our way out */ }
+    heldLocks.delete(token);
+  }
+}
+
+function uninstallSignalHandlers() {
+  for (const sig of [...signalHandlers.keys()]) {
+    try { process.off(sig, signalHandlers.get(sig)); } catch { /* ignore */ }
+    signalHandlers.delete(sig);
+  }
+}
+
+function installSignalHandlers() {
+  if (signalHandlers.size > 0) return;
+  for (const sig of SIGNALS) {
+    const handler = () => {
+      releaseAllHeldLocks();
+      uninstallSignalHandlers();
+      // Re-raise with the default disposition so the exit status stays honest.
+      try { process.kill(process.pid, sig); } catch { process.exit(1); }
+    };
+    signalHandlers.set(sig, handler);
+    try { process.on(sig, handler); } catch { signalHandlers.delete(sig); }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -47,18 +108,20 @@ function getJournalPath(repoKey) {
  * (as used in settle.js).  Synchronous — no async/await, no Promises.
  * @returns {{ ok: boolean, token: string|null, reason: string|null }}
  */
-function acquireSettlementLock(repoKey) {
+export function acquireSettlementLock(repoKey) {
   let attempts = 0;
   const maxAttempts = 5;
   const retryMs = 200;
 
   while (attempts < maxAttempts) {
     const res = lock.acquire({
-      stateDir: process.env.COORDINATOR_STATE_DIR || join(os.homedir(), '.claude-coordinator'),
+      stateDir: stateDirPath(),
       repoKey: SETTLEMENTS_LOCK_KEY,
     });
 
     if (res.ok) {
+      heldLocks.add(res.token);
+      installSignalHandlers();
       return { ok: true, token: res.token, reason: null };
     }
 
@@ -80,12 +143,15 @@ function acquireSettlementLock(repoKey) {
 /**
  * Release the settlements lock.
  */
-function releaseSettlementLock(repoKey, token) {
-  return lock.release({
-    stateDir: process.env.COORDINATOR_STATE_DIR || join(os.homedir(), '.claude-coordinator'),
+export function releaseSettlementLock(repoKey, token) {
+  const res = lock.release({
+    stateDir: stateDirPath(),
     repoKey: SETTLEMENTS_LOCK_KEY,
     token,
   });
+  heldLocks.delete(token);
+  if (heldLocks.size === 0) uninstallSignalHandlers();
+  return res;
 }
 
 /**
@@ -110,27 +176,33 @@ export function guardedSettlements(opts) {
   if (!lockRes.ok) {
     // R1: if lock cannot be acquired, do NOT touch the journal at all
     if (lockRequired) {
-      return { code: 3, journal: null, reason: 'LOCK_BUSY' };
+      return { code: CODE_LOCK_BUSY, journal: null, reason: 'LOCK_BUSY' };
     }
     // Non-strict mode: proceed without lock (tests only)
   }
 
   try {
-    // Read
+    // Read.  A journal that exists but cannot be parsed into an object is
+    // CORRUPT: the cycle stops here and the file is left exactly as it is.
+    // Overwriting it would destroy the very records that make disposal
+    // non-repeating (B6, contract «Возобновление»).
     let journal;
-    try {
-      if (fs.existsSync(journalPath)) {
-        journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
-        // If the JSON is valid but not an object, treat as corrupt
-        if (journal === null || typeof journal !== 'object' || Array.isArray(journal)) {
-          journal = {};
-        }
-      } else {
-        journal = {};
+    if (fs.existsSync(journalPath)) {
+      let raw;
+      try {
+        raw = fs.readFileSync(journalPath, 'utf8');
+      } catch {
+        return { code: CODE_IO_ERROR, journal: null, reason: 'IO_ERROR' };
       }
-    } catch {
-      // Parse error — journal is corrupt; return empty object so mutateFn can work,
-      // but mark it as corrupt via reason
+      try {
+        journal = JSON.parse(raw);
+      } catch {
+        return { code: CODE_JOURNAL_CORRUPT, journal: null, reason: 'CORRUPT' };
+      }
+      if (journal === null || typeof journal !== 'object' || Array.isArray(journal)) {
+        return { code: CODE_JOURNAL_CORRUPT, journal: null, reason: 'CORRUPT' };
+      }
+    } else {
       journal = {};
     }
 
@@ -144,13 +216,11 @@ export function guardedSettlements(opts) {
     fs.writeFileSync(tmp, JSON.stringify(journal, null, 2), 'utf8');
     fs.renameSync(tmp, journalPath);
 
-    return { code: 0, journal, reason: null };
-  } catch (err) {
-    // R1: on any error, release lock and return diagnostic
-    if (lockRes.ok) {
-      releaseSettlementLock(repoKey, lockRes.token);
-    }
-    return { code: 3, journal: null, reason: 'LOCK_ERROR' };
+    return { code: CODE_OK, journal, reason: null };
+  } catch {
+    // A failure of the mutation or of the write itself is a different outcome
+    // from «busy» and carries its own code.
+    return { code: CODE_IO_ERROR, journal: null, reason: 'IO_ERROR' };
   } finally {
     if (lockRes.ok) {
       releaseSettlementLock(repoKey, lockRes.token);
@@ -199,12 +269,14 @@ export function isDisposalCompleted(dispatchId, repoKey) {
  */
 export function recordDisposal(dispatchId, repoKey, opts) {
   const { verdict } = opts;
-  return guardedSettlements({
+  let entryFound = false;
+  const res = guardedSettlements({
     repoKey,
     lockRequired: true,
     mutateFn: (journal) => {
       const entry = journal[dispatchId];
       if (!entry) return;
+      entryFound = true;
       entry.completedAction = {
         name: 'dispose-resources',
         verdict,
@@ -214,6 +286,13 @@ export function recordDisposal(dispatchId, repoKey, opts) {
       };
     },
   });
+  if (res.code !== CODE_OK) return res;
+  if (!entryFound) {
+    // Nothing was recorded: saying «ok» here would report an action as
+    // remembered when the journal holds no trace of it.
+    return { code: CODE_ESCALATE, journal: null, reason: 'NO_ENTRY' };
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,21 +308,29 @@ export function recordDisposal(dispatchId, repoKey, opts) {
  * @param {string|null} repoKey
  * @returns {object} { code: number, reason: string|null }
  */
-export function recordPending(dispatchId, repoKey) {
-  return guardedSettlements({
+export function recordPending(dispatchId, repoKey, opts = {}) {
+  let entryFound = false;
+  const res = guardedSettlements({
     repoKey,
     lockRequired: true,
     mutateFn: (journal) => {
       const entry = journal[dispatchId];
       if (!entry) return;
+      entryFound = true;
       entry.completedAction = {
         name: 'dispose-resources',
         status: 'pending',
+        trigger: opts.trigger || null,
         at: new Date().toISOString(),
         eventId: null,
       };
     },
   });
+  if (res.code !== CODE_OK) return res;
+  if (!entryFound) {
+    return { code: CODE_ESCALATE, journal: null, reason: 'NO_ENTRY' };
+  }
+  return res;
 }
 
 /**
@@ -285,120 +372,186 @@ export function isDisposalPending(dispatchId, repoKey) {
  *
  * @param {object}   opts
  * @param {string}   opts.dispatchId
- * @param {string}   opts.runId
- * @param {string}   opts.taskId
- * @param {string}   opts.worktree
+ * @param {string}   opts.runId — the run this process is completing.
+ * @param {string}   opts.taskId — optional; checked against the journal entry.
  * @param {string|null} opts.repoKey
- * @param {number}   opts.pollMs
- * @param {number}   opts.deadlineMs
+ * @param {boolean}  opts.deadlineExceeded — true when the wait ended on the
+ *   deadline rather than on a result.  Only then may a live dispatch be
+ *   stopped, and the step still stays unsettled.
  * @returns {object} { code: number, body: string|null }
  *
- * Exit codes (align with settle.js family 20–23):
- *   0 — resources disposed, action recorded, `unsettled` stays in journal.
- *   20 — disposal already completed: nothing to do, exit 0 (B5).
- *   23 — lock busy: journal untouched (B4).
- *   5 — dispatch ownership or stop result cannot be confirmed → escalation.
+ * Exit codes:
+ *   0  — resources disposed (or already disposed): `unsettled` stays in the journal.
+ *   5  — ownership or stop result cannot be confirmed → escalation.
+ *   23 — lock busy: journal untouched, worker-stop not called (B4).
+ *   24 — journal corrupt: left untouched, nothing stopped (B6).
+ *   25 — read or write error.
  */
 export function disposeResources(opts) {
   const {
-    dispatchId, runId, taskId, worktree, repoKey, pollMs = 15000, deadlineMs = 600000,
+    dispatchId, runId, taskId, repoKey, deadlineExceeded = false,
   } = opts;
 
-  // Read settlements journal entry
+  // Read settlements journal entry.  A corrupt journal is its own outcome and
+  // is left untouched (B6).
   const journalPath = getJournalPath(repoKey);
   let entry;
-  try {
-    if (fs.existsSync(journalPath)) {
-      const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
-      entry = journal[dispatchId];
+  if (fs.existsSync(journalPath)) {
+    let raw;
+    try {
+      raw = fs.readFileSync(journalPath, 'utf8');
+    } catch {
+      return { code: CODE_IO_ERROR, body: 'journal read error for ' + dispatchId };
     }
-  } catch {
-    return { code: 5, body: 'journal read error for ' + dispatchId };
+    let journal;
+    try {
+      journal = JSON.parse(raw);
+    } catch {
+      return { code: CODE_JOURNAL_CORRUPT, body: 'settlements journal is unreadable and was left untouched: ' + journalPath };
+    }
+    if (journal === null || typeof journal !== 'object' || Array.isArray(journal)) {
+      return { code: CODE_JOURNAL_CORRUPT, body: 'settlements journal is not an object and was left untouched: ' + journalPath };
+    }
+    entry = journal[dispatchId];
   }
 
   if (!entry) {
-    return { code: 5, body: 'no settlement entry for ' + dispatchId };
+    return { code: CODE_ESCALATE, body: 'no settlement entry for ' + dispatchId };
   }
 
   const verdict = entry.verdict || null;
-  const evidence = entry.evidence || {};
-  const workerDone = evidence.workerDone || {};
+  const completedAction = entry.completedAction;
+  const status = completedAction ? completedAction.status : undefined;
 
-  // Check completedAction state
-  const completedAction = entry.completedAction || {};
-  const status = completedAction.status;
+  // A record written before the pending→completed protocol existed carries no
+  // status.  Its outcome is unknown, and an unknown outcome is never a
+  // permission to stop again: it is escalated, not assumed either way.
+  if (completedAction && status !== 'pending' && status !== 'completed') {
+    return {
+      code: CODE_ESCALATE,
+      body: 'completedAction for ' + dispatchId + ' carries no recognised status (' +
+            JSON.stringify(status) + '); outcome unknown, nothing was stopped',
+    };
+  }
 
   // Case: completed → B5: code 0, nothing to do
   if (status === 'completed') {
-    return { code: 0, body: `disposal already completed for ${dispatchId}; nothing to do` };
+    return { code: CODE_OK, body: `disposal already completed for ${dispatchId}; nothing to do` };
   }
 
-  // Case: pending → path 4: re-read dispatch state
+  // Ownership is confirmed against the run this process owns, using the task
+  // identity stored in the journal entry — never by comparing a value in the
+  // entry with the key the same entry lives under.
+  const ownership = _confirmOwnership({ entry, dispatchId, runId, taskId });
+  if (!ownership.ok) {
+    return { code: CODE_ESCALATE, body: 'dispatch ownership cannot be confirmed for ' + dispatchId + ': ' + ownership.reason };
+  }
+
+  // Case: pending → recovery after an interruption.  The stop is never
+  // repeated: either the outcome is confirmed, or it is escalated.
   if (status === 'pending') {
-    // Re-read dispatch state from Orca
-    const dispatchInfo = _readDispatchState(dispatchId, runId, taskId);
-    if (!dispatchInfo) {
-      return { code: 5, body: 'cannot read dispatch state in pending recovery' };
-    }
-    if (dispatchInfo.confirmed) {
-      // Confirmed completion → mark completed
+    if (ownership.finished) {
       const result = recordDisposal(dispatchId, repoKey, { verdict });
-      if (result.code !== 0) {
-        return { code: 23, body: 'lock busy while recording completion' };
+      if (result.code !== CODE_OK) {
+        return { code: result.code, body: 'completion could not be recorded (' + result.reason + '); state remains pending' };
       }
-      return { code: 0, body: `disposal confirmed completed for ${dispatchId}` };
+      return { code: CODE_OK, body: `disposal confirmed completed for ${dispatchId}` };
     }
-    // Unknown outcome → escalation, no repeated stop
-    return { code: 5, body: 'dispatch outcome unknown in pending state; escalation' };
+    return {
+      code: CODE_ESCALATE,
+      body: 'dispatch ' + dispatchId + ' is still ' + JSON.stringify(ownership.state) +
+            ' after an interrupted disposal; outcome unknown, the stop is not repeated',
+    };
   }
 
-  // unset or absent → path 5: confirm ownership, re-read dispatch state
-  const actualDispatchId = workerDone.dispatchId || null;
-
-  // Ownership check: Orca-reported dispatchId must match
-  if (actualDispatchId !== dispatchId) {
-    return { code: 5, body: 'dispatch ownership cannot be confirmed for ' + dispatchId };
+  // No action recorded yet.  A live dispatch is stopped only when the deadline
+  // has passed; the step then stays unsettled — stopping is not acceptance.
+  if (!ownership.finished && !deadlineExceeded) {
+    return {
+      code: CODE_ESCALATE,
+      body: 'dispatch ' + dispatchId + ' is still ' + JSON.stringify(ownership.state) +
+            ' and no deadline was reached; nothing was stopped',
+    };
   }
 
-  // Re-read dispatch state from Orca
-  const dispatchInfo = _readDispatchState(dispatchId, runId, taskId);
-  if (!dispatchInfo) {
-    return { code: 5, body: 'cannot read dispatch state for ownership confirmation' };
-  }
-  if (!dispatchInfo.confirmed) {
-    // Dispatch not ours or not finished → escalation
-    return { code: 5, body: 'dispatch ownership confirmation failed: ' + (dispatchInfo.reason || 'unknown') };
-  }
-
-  // Step 6: record pending under lock
-  const pendingResult = recordPending(dispatchId, repoKey);
-  if (pendingResult.code !== 0) {
-    // Lock busy — stop is NOT called (B4)
-    return { code: 23, body: 'disposal record could not be saved: lock busy' };
+  // Step 6: record the intent under lock.  If it cannot be saved, the stop is
+  // not called at all (B4).
+  const pendingResult = recordPending(dispatchId, repoKey, {
+    trigger: ownership.finished ? 'result' : 'deadline',
+  });
+  if (pendingResult.code !== CODE_OK) {
+    return {
+      code: pendingResult.code,
+      body: 'disposal intent could not be saved (' + pendingResult.reason + '); worker-stop was not called',
+    };
   }
 
   // Step 7: call stop
   const stopResult = _callStop(dispatchId);
-  if (stopResult.code !== 0) {
-    // Stop failed — state stays pending, to be handled by path 4
+  if (stopResult.code !== CODE_OK) {
+    // Stop failed — state stays pending, to be handled by the recovery path.
     return stopResult;
   }
 
-  // Step 8: record completed with actual result
+  // Step 8: record completed with actual result.  The verdict of the
+  // observation is carried over unchanged: disposal never settles a step.
   const completedResult = recordDisposal(dispatchId, repoKey, { verdict });
-  if (completedResult.code !== 0) {
-    // Could not record completion — state stays pending
-    return { code: 5, body: 'completedAction could not be recorded; state remains pending' };
+  if (completedResult.code !== CODE_OK) {
+    return {
+      code: completedResult.code,
+      body: 'completedAction could not be recorded (' + completedResult.reason + '); state remains pending',
+    };
   }
 
-  return { code: 0, body: `resources disposed for ${dispatchId}` };
+  return {
+    code: CODE_OK,
+    body: `resources disposed for ${dispatchId}` + (ownership.finished ? '' : ' after deadline; step stays unsettled'),
+  };
 }
 
 /**
- * Read dispatch state from Orca via worker-list.
- * Returns { confirmed: boolean, reason: string|null } or null on read failure.
+ * Confirm that a dispatch belongs to the run this process is completing.
+ *
+ * The identity being confirmed comes from the journal entry; the confirmation
+ * comes from Orca, scoped to the caller's own run.  Comparing a field of the
+ * entry with the key that entry is stored under would confirm nothing.
+ *
+ * @returns {{ ok: boolean, finished?: boolean, state?: string|null, reason: string|null }}
  */
-function _readDispatchState(dispatchId, runId, taskId) {
+function _confirmOwnership({ entry, dispatchId, runId, taskId }) {
+  const journalTaskId = entry?.evidence?.workerDone?.taskId || null;
+  if (!journalTaskId) {
+    return { ok: false, reason: 'the journal entry carries no taskId to confirm against' };
+  }
+  if (taskId && taskId !== journalTaskId) {
+    return {
+      ok: false,
+      reason: 'taskId ' + JSON.stringify(taskId) + ' does not match the journal entry (' + JSON.stringify(journalTaskId) + ')',
+    };
+  }
+  if (!runId) {
+    return { ok: false, reason: 'no run id to scope the ownership check' };
+  }
+
+  const listed = _readDispatchState(dispatchId, runId, journalTaskId);
+  if (!listed.ok) {
+    return { ok: false, reason: listed.reason };
+  }
+  return { ok: true, finished: listed.finished, state: listed.state, reason: null };
+}
+
+const FINISHED_STATES = ['succeeded', 'failed', 'stopped', 'abandoned', 'completed'];
+
+/**
+ * Read dispatch state from Orca via worker-list, scoped to one run.
+ *
+ * A dispatch counts as belonging to the run only if the run's own worker list
+ * holds a record with this dispatchId and the expected taskId.  A record
+ * without a readable state is not treated as finished.
+ *
+ * @returns {{ ok: boolean, finished?: boolean, state?: string|null, reason: string|null }}
+ */
+function _readDispatchState(dispatchId, runId, expectedTaskId) {
   try {
     const launch = resolveOrcaLaunch();
     const result = _spawnSync(launch.executable, [
@@ -412,29 +565,30 @@ function _readDispatchState(dispatchId, runId, taskId) {
     });
 
     if (result.error || result.status !== 0) {
-      return { confirmed: false, reason: 'worker-list failed' };
+      return { ok: false, reason: 'worker-list failed' };
     }
 
     const out = result.stdout;
     if (typeof out !== 'string' || out.trim().length === 0) {
-      return { confirmed: false, reason: 'worker-list returned empty' };
+      return { ok: false, reason: 'worker-list returned empty' };
     }
 
     const workers = _parseWorkerList(out);
-    const rec = workers.find(w => w.dispatchId === dispatchId && w.taskId === taskId);
+    const rec = workers.find(w => w.dispatchId === dispatchId && w.taskId === expectedTaskId);
     if (!rec) {
-      return { confirmed: false, reason: 'dispatch not found in worker-list' };
+      return { ok: false, reason: 'dispatch is not in the worker list of run ' + runId };
     }
 
-    // Check if the dispatch is finished
-    const dispatchStatus = rec.dispatchStatus || null;
-    if (dispatchStatus && ['completed', 'failed', 'stopped', 'abandoned'].includes(dispatchStatus)) {
-      return { confirmed: true, reason: null };
+    // `state` is what Orca reports; `dispatchStatus` is kept for the older
+    // shape settle.js records.
+    const state = rec.state || rec.dispatchStatus || null;
+    if (!state) {
+      return { ok: false, reason: 'worker-list record carries no state' };
     }
 
-    return { confirmed: false, reason: 'dispatch status ' + JSON.stringify(dispatchStatus) + ' is not finished' };
+    return { ok: true, finished: FINISHED_STATES.includes(state), state, reason: null };
   } catch {
-    return { confirmed: false, reason: 'worker-list threw exception' };
+    return { ok: false, reason: 'worker-list threw exception' };
   }
 }
 
@@ -457,12 +611,12 @@ function _callStop(dispatchId) {
     });
 
     if (result.error || result.status !== 0) {
-      return { code: 5, body: 'worker-stop returned ' + (result.status || 'error') };
+      return { code: CODE_ESCALATE, body: 'worker-stop returned ' + (result.status || 'error') + '; state remains pending' };
     }
 
-    return { code: 0, body: null };
+    return { code: CODE_OK, body: null };
   } catch {
-    return { code: 5, body: 'worker-stop threw exception' };
+    return { code: CODE_ESCALATE, body: 'worker-stop threw exception; state remains pending' };
   }
 }
 
@@ -517,3 +671,32 @@ function resolveOrcaLaunch(env = process.env) {
 
   return { executable, prefixArgs };
 }
+
+// ---------------------------------------------------------------------------
+// Recovery after a crash that could not run JavaScript
+// ---------------------------------------------------------------------------
+//
+// SIGINT and SIGTERM release the settlements lock (see installSignalHandlers).
+// A SIGKILL, a power loss or a lost machine cannot: the lock directory stays
+// behind and every later write reports busy.
+//
+// Recovery is a deliberate operator action and never an automatic release,
+// because a held lock may still belong to a living process:
+//
+//   1. `lock.status({ stateDir, repoKey: 'settlements-guard' })` — who holds
+//      it, since when, and what `classifyOwner` says about that owner.
+//   2. Only when the owner classifies as dead, and only then:
+//      `lock.forceRelease({ stateDir, repoKey: 'settlements-guard',
+//                           confirm: true, reason: '<why>' })`.
+//   3. If the owner cannot be classified — another host, an unknown pid —
+//      the lock stays. Escalate instead of guessing: a lock taken from a live
+//      writer costs more than a wait.
+//
+// Note on the limits of the handlers: this module writes synchronously, and a
+// signal that arrives while a synchronous block is running is delivered only
+// after that block ends. The handlers cover the ordinary case — a process
+// interrupted while holding the lock between writes — not an interruption in
+// the middle of one.
+export const RECOVERY_AFTER_CRASH =
+  'lock.status({repoKey:"settlements-guard"}) → classifyOwner → ' +
+  'lock.forceRelease({confirm:true}) only for an owner classified dead; otherwise escalate.';

@@ -395,19 +395,22 @@ function watch(args) {
     },
   });
 
-  if (guardResult.code === 3) {
-    // R1: lock busy — journal was not touched.
-    // Print a diagnostic entry without the record.
+  if (guardResult.code !== 0) {
+    // The journal was not touched: busy (23), corrupt (24) or an I/O error
+    // (25).  Each keeps its own code so the caller knows which it was, and a
+    // corrupt journal is reported, never rewritten.
     const entry = {
       ...verdictResult,
       evidence,
       deadlineExceeded,
       recommendedRecovery,
-      lockBusy: true,
+      journalNotWritten: guardResult.reason,
       recordedAt: new Date().toISOString(),
     };
+    if (guardResult.reason === 'LOCK_BUSY') entry.lockBusy = true;
+    if (guardResult.reason === 'CORRUPT') entry.journalCorrupt = true;
     process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
-    return 23; // diagnostic code for lock busy
+    return guardResult.code;
   }
 
   // Print the entry (alreadyRecorded flag is set correctly in mutateFn)

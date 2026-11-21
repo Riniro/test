@@ -1,13 +1,22 @@
 #!/usr/bin/env node
-// settlement-guard.js — CLI entry point for settlement guard commands.
+// settlement-guard.js — CLI entry point for the settlement guard.
 //
 // Usage:
-//   node settlement-guard.js dispose --dispatch <id> --run <id> --task <id> --worktree <path> [--repo-key <key>]
+//   node settlement-guard.js dispose --dispatch <id> --run <id> [--task <id>]
+//                            [--repo-key <key>] [--deadline-exceeded]
 //
-// Exit codes:
-//   0  — disposal completed or already completed (B5).
-//   3  — lock busy: journal untouched (B4).
-//   5  — escalation: ownership/stop result cannot be confirmed.
+// Exit codes (the same numbers the module returns, so a caller never has to
+// translate between layers):
+//   0  — resources disposed, or already disposed: nothing to do.
+//   2  — wrong usage.
+//   5  — ownership or stop result cannot be confirmed → escalation.
+//   23 — lock busy: journal untouched, worker-stop not called.
+//   24 — journal corrupt: left untouched, nothing stopped.
+//   25 — read or write error.
+//
+// --deadline-exceeded says the wait ended on the deadline rather than on a
+// result.  Only then may a live dispatch be stopped, and the step still stays
+// unsettled: stopping is not acceptance.
 
 import { parseArgs } from 'node:util';
 
@@ -18,49 +27,51 @@ function die(msg) {
   process.exit(2);
 }
 
-function main() {
-  const argv = process.argv.slice(2);
+const USAGE = 'Usage: node settlement-guard.js dispose --dispatch <id> --run <id> ' +
+  '[--task <id>] [--repo-key <key>] [--deadline-exceeded]';
 
-  if (argv.length === 0) {
-    die('Usage: node settlement-guard.js dispose --dispatch <id> --run <id> --task <id> --worktree <path> [--repo-key <key>]');
-  }
+export function main(argvInput) {
+  const argv = argvInput || process.argv.slice(2);
+
+  if (argv.length === 0) die(USAGE);
 
   const command = argv[0];
+  if (command !== 'dispose') die('Unknown command: ' + command + '. Use: dispose');
 
-  if (command !== 'dispose') {
-    die('Unknown command: ' + command + '. Use: dispose');
+  let values;
+  try {
+    ({ values } = parseArgs({
+      options: {
+        dispatch: { type: 'string' },
+        run: { type: 'string' },
+        task: { type: 'string' },
+        worktree: { type: 'string' },
+        'repo-key': { type: 'string' },
+        'deadline-exceeded': { type: 'boolean', default: false },
+      },
+      allowPositionals: false,
+      args: argv.slice(1),
+    }));
+  } catch (err) {
+    die(err.message + '\n' + USAGE);
   }
 
-  // Parse remaining flags
-  const { values } = parseArgs({
-    options: {
-      dispatch: { type: 'string', required: true },
-      run: { type: 'string', required: true },
-      task: { type: 'string', required: true },
-      worktree: { type: 'string', required: true },
-      'repo-key': { type: 'string', default: null },
-    },
-    allowPositionals: true,
-    argv: argv.slice(1),
-  });
+  if (!values.dispatch) die('--dispatch is required\n' + USAGE);
+  if (!values.run) die('--run is required\n' + USAGE);
 
   const result = guard.disposeResources({
     dispatchId: values.dispatch,
     runId: values.run,
     taskId: values.task,
-    worktree: values.worktree,
     repoKey: values['repo-key'],
+    deadlineExceeded: values['deadline-exceeded'],
   });
 
-  // Map code to exit: code 20 → 0 (B5), code 3 → 3, code 5 → 5
-  const exitCode = result.code === 20 ? 0 : result.code;
-
-  process.stdout.write(JSON.stringify({ code: result.code, exitCode, body: result.body }) + '\n');
-  process.exit(exitCode);
+  process.stdout.write(JSON.stringify({ code: result.code, body: result.body }) + '\n');
+  return result.code;
 }
 
-if (process.argv[1] && process.argv[1].endsWith('settlement-guard.js')) {
-  main();
+const invokedPath = process.argv[1] ? process.argv[1].split(String.fromCharCode(92)).join('/') : '';
+if (invokedPath.endsWith('/settlement-guard.js') && !invokedPath.endsWith('/tools/settlement-guard.js')) {
+  process.exit(main());
 }
-
-export { main };

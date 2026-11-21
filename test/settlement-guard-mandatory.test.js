@@ -1,577 +1,450 @@
-// settlement-guard-mandatory.test.js — mandatory tests from TЗ (B1–B6).
-// Each test uses real processes or real files (not only in-process function calls).
+// settlement-guard-mandatory.test.js
+//
+// These tests exercise the real entry points: the CLI process
+// (settlement-guard.js) and settle.js, each with its own temporary state
+// directory, its own HOME, and a stubbed `orca` executable.  Nothing here
+// reads or writes the real ~/.claude-coordinator.
 
-import { after, test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { spawnSync, spawn } from 'node:child_process';
+import {
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import * as guard from '../tools/settlement-guard.js';
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const CLI = join(ROOT, 'settlement-guard.js');
+const SETTLE = join(ROOT, 'tools', 'coordinator', 'settle.js');
+const GUARD_URL = pathToFileURL(join(ROOT, 'tools', 'settlement-guard.js')).href;
+const NL = String.fromCharCode(10);
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const STUB_SOURCE = [
+  "import fs from 'node:fs';",
+  'const args = process.argv.slice(2);',
+  'fs.appendFileSync(process.env.STUB_LOG, args.join(" ") + String.fromCharCode(10));',
+  'const cfg = JSON.parse(fs.readFileSync(process.env.STUB_CONFIG, "utf8"));',
+  'if (args.includes("worker-list")) {',
+  '  process.stdout.write(JSON.stringify({ ok: true, result: { workers: cfg.workers || [] } }));',
+  '  process.exit(0);',
+  '}',
+  'if (args.includes("worker-stop")) { process.exit(cfg.stopExit || 0); }',
+  'process.exit(0);',
+].join(NL);
 
-function makeStateDir() {
-  const dir = mkdtempSync(join(tmpdir(), 'guard-mand-'));
+/** One isolated sandbox: state dir, HOME, orca stub, call log. */
+function sandbox(t, workers, stopExit) {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-mandatory-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
   const stateDir = join(dir, 'state');
-  const settlementsDir = join(stateDir, 'default');
-  if (!existsSync(settlementsDir)) mkdirSync(settlementsDir, { recursive: true });
-  return { dir, stateDir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const home = join(dir, 'home');
+  const worktree = join(dir, 'worktree');
+  for (const d of [stateDir, home, worktree]) mkdirSync(d, { recursive: true });
+
+  const stub = join(dir, 'orca-stub.js');
+  writeFileSync(stub, STUB_SOURCE, 'utf8');
+
+  const configPath = join(dir, 'stub-config.json');
+  const logPath = join(dir, 'stub-calls.log');
+  writeFileSync(configPath, JSON.stringify({ workers: workers || [], stopExit: stopExit || 0 }), 'utf8');
+  writeFileSync(logPath, '', 'utf8');
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    COORDINATOR_STATE_DIR: stateDir,
+    SETTLE_ORCA_EXEC: process.execPath,
+    SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stub]),
+    STUB_CONFIG: configPath,
+    STUB_LOG: logPath,
+  };
+
+  const journalPath = join(stateDir, 'default', 'settlements.json');
+
+  return {
+    dir, stateDir, home, worktree, env, configPath, logPath, journalPath,
+    setWorkers(next, nextStopExit) {
+      writeFileSync(configPath, JSON.stringify({
+        workers: next,
+        stopExit: nextStopExit === undefined ? (stopExit || 0) : nextStopExit,
+      }), 'utf8');
+    },
+    stopCalls() {
+      return readFileSync(logPath, 'utf8').split(NL)
+        .filter((line) => line.includes('worker-stop')).length;
+    },
+    journal() {
+      return JSON.parse(readFileSync(journalPath, 'utf8'));
+    },
+    writeJournal(obj) {
+      mkdirSync(join(stateDir, 'default'), { recursive: true });
+      writeFileSync(journalPath, typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2), 'utf8');
+    },
+  };
+}
+
+function runCli(box, args) {
+  return spawnSync(process.execPath, [CLI, ...args], {
+    env: box.env, encoding: 'utf8', timeout: 60000,
+  });
+}
+
+function runSettle(box, args) {
+  return spawnSync(process.execPath, [SETTLE, ...args], {
+    env: box.env, encoding: 'utf8', timeout: 60000,
+  });
+}
+
+function worker(dispatchId, taskId, state, workerState) {
+  return {
+    dispatchId, taskId, state,
+    workerState: workerState === undefined ? null : workerState,
+    dispatchStatus: state,
+  };
+}
+
+const DISPATCH = 'ctx_mandatory';
+const TASK = 'task_mandatory';
+const RUN = 'run_mandatory';
+
+function settleArgs(box, extra) {
+  return [
+    '--run', RUN, '--task', TASK, '--dispatch', DISPATCH,
+    '--worktree', box.worktree, '--deadline-ms', '1500', '--poll-ms', '400',
+    ...(extra || []),
+  ];
 }
 
 // ---------------------------------------------------------------------------
-// Mandatory test 1: Два процесса — одновременная запись по разным dispatchId
+// 1. The CLI is a real process
 // ---------------------------------------------------------------------------
 
-test('M1: two concurrent processes write different dispatchIds — both records preserved', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
+test('CLI: процесс запускается и печатает использование без аргументов', (t) => {
+  const box = sandbox(t, []);
+  const r = spawnSync(process.execPath, [CLI], { env: box.env, encoding: 'utf8' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /Usage: node settlement-guard.js dispose/);
+  assert.equal(r.stderr.includes('TypeError'), false);
+});
 
+test('CLI: неизвестная команда и отсутствующий обязательный флаг — код 2', (t) => {
+  const box = sandbox(t, []);
+  const bad = runCli(box, ['bogus']);
+  assert.equal(bad.status, 2);
+  const missing = runCli(box, ['dispose', '--dispatch', DISPATCH]);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /--run is required/);
+});
+
+// ---------------------------------------------------------------------------
+// 2. Full cycle through the real entry points
+// ---------------------------------------------------------------------------
+
+test('полный цикл: settle.js записывает, CLI распоряжается ресурсами один раз', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+
+  const settled = runSettle(box, settleArgs(box));
+  assert.ok([0, 20, 21, 22].includes(settled.status), settled.stdout + settled.stderr);
+  assert.ok(existsSync(box.journalPath));
+
+  const disposed = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(disposed.status, 0, disposed.stdout + disposed.stderr);
+  assert.equal(box.stopCalls(), 1);
+  assert.equal(box.journal()[DISPATCH].completedAction.status, 'completed');
+});
+
+test('повторная доставка: второй вызов — no-op, worker-stop не повторяется', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  const first = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(first.status, 0);
+  const second = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(second.status, 0);
+  assert.match(second.stdout, /nothing to do/);
+  assert.equal(box.stopCalls(), 1);
+});
+
+// ---------------------------------------------------------------------------
+// 3. The main criterion, through settle.js itself
+// ---------------------------------------------------------------------------
+
+test('settle.js: смена вердикта не стирает completedAction, остановка не повторяется', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+
+  const first = runSettle(box, settleArgs(box));
+  assert.ok([0, 20, 21, 22].includes(first.status), first.stdout + first.stderr);
+  const firstVerdict = box.journal()[DISPATCH].verdict;
+
+  const disposed = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(disposed.status, 0, disposed.stdout + disposed.stderr);
+  assert.equal(box.stopCalls(), 1);
+
+  // The same dispatch observed again, now without a record in the run's
+  // worker list: the verdict changes and settle.js rewrites the entry.
+  box.setWorkers([]);
+  const second = runSettle(box, settleArgs(box));
+  assert.ok([0, 20, 21, 22].includes(second.status), second.stdout + second.stderr);
+
+  const entry = box.journal()[DISPATCH];
+  assert.notEqual(entry.verdict, firstVerdict, 'вердикт должен был смениться');
+  assert.ok(entry.reasons.includes('VERDICT_CHANGED'));
+  assert.ok(entry.completedAction, 'completedAction стёрт перезаписью наблюдения');
+  assert.equal(entry.completedAction.status, 'completed');
+
+  const again = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /nothing to do/);
+  assert.equal(box.stopCalls(), 1, 'worker-stop вызван повторно после смены вердикта');
+});
+
+test('старая отметка без status не разрешает новую остановку', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  const journal = box.journal();
+  journal[DISPATCH].completedAction = {
+    name: 'dispose-resources',
+    verdict: 'SETTLED_BY_WORKER',
+    at: new Date().toISOString(),
+    eventId: null,
+  };
+  box.writeJournal(journal);
+
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /no recognised status/);
+  assert.equal(box.stopCalls(), 0, 'остановка выполнена по записи с неизвестным исходом');
+});
+
+// ---------------------------------------------------------------------------
+// 4. Corrupt journal, on both write paths
+// ---------------------------------------------------------------------------
+
+test('повреждённый журнал: settle.js его не перезаписывает', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  const broken = '{"keep-1": {"verdict": "SETTLED_BY_WORKER", "completedAction": {"status": "completed"}}, BROKEN';
+  box.writeJournal(broken);
+
+  const r = runSettle(box, settleArgs(box));
+  assert.equal(r.status, 24, r.stdout + r.stderr);
+  assert.equal(readFileSync(box.journalPath, 'utf8'), broken);
+});
+
+test('повреждённый журнал: CLI его не перезаписывает и ничего не останавливает', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  const broken = '{"keep-1": {"completedAction": {"status": "completed"}}, BROKEN';
+  box.writeJournal(broken);
+
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 24, r.stdout + r.stderr);
+  assert.equal(readFileSync(box.journalPath, 'utf8'), broken);
+  assert.equal(box.stopCalls(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// 5. Two processes, and a busy lock
+// ---------------------------------------------------------------------------
+
+const WRITER_SOURCE = [
+  'import { guardedSettlements } from ' + JSON.stringify(GUARD_URL) + ';',
+  'const key = process.argv[2];',
+  'const holdMs = Number(process.argv[3]);',
+  'const res = guardedSettlements({ repoKey: null, lockRequired: true, mutateFn: (journal) => {',
+  '  const end = Date.now() + holdMs;',
+  '  while (Date.now() < end) { /* hold the read-write window open */ }',
+  '  journal[key] = { verdict: "WORK_PRESENT_UNSETTLED", evidence: {} };',
+  '} });',
+  'process.stdout.write(String(res.code));',
+].join(NL);
+
+const HOLDER_SOURCE = [
+  'import { acquireSettlementLock } from ' + JSON.stringify(GUARD_URL) + ';',
+  'const res = acquireSettlementLock(null);',
+  'if (!res.ok) { process.stdout.write("BUSY"); process.exit(9); }',
+  'process.stdout.write("HELD");',
+  'setInterval(() => {}, 1000);',
+].join(NL);
+
+test('два процесса пишут по разным dispatchId — обе записи сохраняются', (t) => {
+  const box = sandbox(t, []);
+  box.writeJournal({ 'pre-existing': { verdict: 'SEED' } });
+
+  const writer = join(box.dir, 'writer.js');
+  writeFileSync(writer, WRITER_SOURCE, 'utf8');
+
+  const a = spawn(process.execPath, [writer, 'ctx_a', '250'], { env: box.env });
+  const b = spawn(process.execPath, [writer, 'ctx_b', '250'], { env: box.env });
+
+  return Promise.all([a, b].map((child) => new Promise((resolve) => {
+    child.on('exit', resolve);
+  }))).then(() => {
+    const journal = box.journal();
+    assert.ok(journal['pre-existing'], 'исходная запись потеряна');
+    assert.ok(journal['ctx_a'], 'запись первого процесса потеряна');
+    assert.ok(journal['ctx_b'], 'запись второго процесса потеряна');
+  });
+});
+
+/** Start a child that holds the settlements lock; resolve once it is held. */
+function startHolder(box) {
+  const holder = join(box.dir, 'holder.js');
+  writeFileSync(holder, HOLDER_SOURCE, 'utf8');
+  const child = spawn(process.execPath, [holder], { env: box.env });
+  return new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', (chunk) => {
+      out += String(chunk);
+      if (out.includes('HELD')) resolve(child);
+      if (out.includes('BUSY')) reject(new Error('holder could not take the lock'));
+    });
+    child.on('exit', () => { if (!out.includes('HELD')) reject(new Error('holder exited early')); });
+  });
+}
+
+test('занятая блокировка: код 23 и worker-stop не вызывается', async (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+  const before = readFileSync(box.journalPath, 'utf8');
+
+  const holder = await startHolder(box);
   try {
-    // Use file:// URLs for ESM imports — Windows paths must be valid file:// URLs.
-    const guardUrl = pathToFileURL(join(process.cwd(), 'tools', 'settlement-guard.js')).href;
-    const stubDir = join(stateDir, 'concurrent-stubs');
-    mkdirSync(stubDir, { recursive: true });
-
-    // Stub A: writes dispatch-a
-    const stubA = join(stubDir, 'a.mjs');
-    writeFileSync(stubA, `
-      import * as guard from '${guardUrl}';
-
-      guard.guardedSettlements({
-        repoKey: 'default',
-        lockRequired: true,
-        mutateFn: (journal) => {
-          journal['dispatch-concurrent-a'] = { verdict: 'SETTLED_BY_WORKER', recordBy: 'A' };
-        },
-      });
-    `, 'utf8');
-
-    // Stub B: writes dispatch-b
-    const stubB = join(stubDir, 'b.mjs');
-    writeFileSync(stubB, `
-      import * as guard from '${guardUrl}';
-
-      guard.guardedSettlements({
-        repoKey: 'default',
-        lockRequired: true,
-        mutateFn: (journal) => {
-          journal['dispatch-concurrent-b'] = { verdict: 'WORK_PRESENT_UNSETTLED', recordBy: 'B' };
-        },
-      });
-    `, 'utf8');
-
-    // Run both stubs concurrently (real processes)
-    const [resultA, resultB] = await Promise.all([
-      spawnSync(process.execPath, [stubA], { encoding: 'utf8', timeout: 10000 }),
-      spawnSync(process.execPath, [stubB], { encoding: 'utf8', timeout: 10000 }),
-    ]);
-
-    // Both should succeed (sequentialized by lock)
-    assert.equal(resultA.status, 0, 'stub A should exit 0, stderr: ' + resultA.stderr);
-    assert.equal(resultB.status, 0, 'stub B should exit 0, stderr: ' + resultB.stderr);
-
-    // Read journal — both records should be present
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-    assert.ok(journal['dispatch-concurrent-a'], 'dispatch-a should be in journal');
-    assert.ok(journal['dispatch-concurrent-b'], 'dispatch-b should be in journal');
-    assert.equal(journal['dispatch-concurrent-a'].recordBy, 'A');
-    assert.equal(journal['dispatch-concurrent-b'].recordBy, 'B');
+    const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+    assert.equal(r.status, 23, r.stdout + r.stderr);
+    assert.match(r.stdout, /worker-stop was not called/);
+    assert.equal(box.stopCalls(), 0);
+    assert.equal(readFileSync(box.journalPath, 'utf8'), before, 'журнал изменён при занятой блокировке');
   } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
+    holder.kill('SIGKILL');
   }
 });
 
 // ---------------------------------------------------------------------------
-// Mandatory test 2: Повторная доставка — тот же worker_done дважды, остановка один раз
+// 6. Deadline and ownership
 // ---------------------------------------------------------------------------
 
-test('M2: repeated delivery — same worker_done twice, stop called only once', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
+test('дедлайн: живой dispatch останавливается, шаг остаётся unsettled', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'running', null)]);
 
-  try {
-    // Create a journal entry without completedAction
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-retry'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          completedAction: null,
-          evidence: { workerDone: { dispatchId: 'ctx-retry' } },
-        };
-      },
-    });
+  const settled = runSettle(box, settleArgs(box));
+  assert.notEqual(settled.status, 0);
+  const before = box.journal()[DISPATCH];
+  assert.notEqual(before.verdict, 'SETTLED_BY_WORKER');
 
-    // Track how many times worker-stop was called
-    const stopLog = join(stateDir, 'stop-log.txt');
-    writeFileSync(stopLog, '', 'utf8');
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK, '--deadline-exceeded']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(box.stopCalls(), 1);
 
-    const stubDir = join(stateDir, 'retry-stub');
-    mkdirSync(stubDir, { recursive: true });
-    const stubPath = join(stubDir, 'retry-stub.mjs');
-    writeFileSync(stubPath, `
-      import { appendFileSync } from 'node:fs';
-      const argv = process.argv.slice(2);
-      const subCmd = argv.length > 1 ? argv[1] : '';
-      if (subCmd === 'worker-stop') {
-        appendFileSync(${JSON.stringify(stopLog)}, 'stop\\n', 'utf8');
-      }
-      if (subCmd === 'worker-list') {
-        process.stdout.write(JSON.stringify({
-          result: { workers: [{ dispatchId: 'ctx-retry', taskId: 'task-retry', dispatchStatus: 'stopped' }] }
-        }) + '\\n');
-      }
-      process.exit(0);
-    `, 'utf8');
+  const after = box.journal()[DISPATCH];
+  assert.equal(after.verdict, before.verdict, 'вердикт подменён распоряжением ресурсами');
+  assert.equal(after.evidence.workerDone.found, false, 'worker_done подделан');
+  assert.equal(after.completedAction.status, 'completed');
+  assert.equal(after.completedAction.verdict, before.verdict);
+  // worker-list gives no message id, so the absence of one is recorded as an
+  // absence; a (dispatchId, verdict) pair must never stand in for it.
+  assert.equal(after.completedAction.eventId, null);
+});
 
-    process.env.SETTLE_ORCA_EXEC = process.execPath;
-    process.env.SETTLE_ORCA_PREFIX_ARGS_JSON = JSON.stringify([stubPath]);
+test('без дедлайна живой dispatch не останавливается', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'running', null)]);
+  runSettle(box, settleArgs(box));
 
-    try {
-      // First call — should record pending, call stop, record completed
-      const result1 = guard.disposeResources({
-        dispatchId: 'ctx-retry',
-        runId: 'run-retry',
-        taskId: 'task-retry',
-        worktree: join(stateDir, 'worktree'),
-        repoKey: 'default',
-      });
-      assert.equal(result1.code, 0, 'first call should succeed');
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /no deadline was reached/);
+  assert.equal(box.stopCalls(), 0);
+});
 
-      // Second call — should be code 0 (already completed), NOT call stop again
-      const result2 = guard.disposeResources({
-        dispatchId: 'ctx-retry',
-        runId: 'run-retry',
-        taskId: 'task-retry',
-        worktree: join(stateDir, 'worktree'),
-        repoKey: 'default',
-      });
-      assert.equal(result2.code, 0, 'second call should return 0 (already completed)');
+test('принадлежность: dispatch отсутствует в списке своего запуска — эскалация без остановки', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
 
-      // Check that worker-stop was called exactly once
-      const stopCount = readFileSync(stopLog, 'utf8').trim().split('\n').filter(s => s === 'stop').length;
-      assert.equal(stopCount, 1, 'worker-stop should be called exactly once');
-    } finally {
-      delete process.env.SETTLE_ORCA_EXEC;
-      delete process.env.SETTLE_ORCA_PREFIX_ARGS_JSON;
-    }
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
+  box.setWorkers([worker('ctx_someone_else', 'task_other', 'succeeded', 'succeeded')]);
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /not in the worker list/);
+  assert.equal(box.stopCalls(), 0);
+});
+
+test('принадлежность: taskId расходится с журнальной записью — эскалация без остановки', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded', 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', 'task_claimed_by_caller']);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /does not match the journal entry/);
+  assert.equal(box.stopCalls(), 0);
 });
 
 // ---------------------------------------------------------------------------
-// Mandatory test 3: Смена вердикта — completedAction на месте, повторное — code 0
-// (B1 through settle.js)
+// 7. Interruption between the stop and the result record
 // ---------------------------------------------------------------------------
 
-test('M3: changed verdict preserves completedAction, re-dispatch is code 0', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
+test('обрыв после остановки: подтверждённое завершение — успешный no-op без повторной остановки', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'stopped', null)]);
+  runSettle(box, settleArgs(box));
 
-  try {
-    // Simulate settle.js behavior: entry with completedAction, then rewritten with different verdict
-    // First, record the disposal
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-verdict'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          completedAction: {
-            name: 'dispose-resources',
-            verdict: 'WORK_PRESENT_UNSETTLED',
-            status: 'completed',
-            at: new Date().toISOString(),
-            eventId: null,
-          },
-          evidence: { workerDone: { dispatchId: 'ctx-verdict' } },
-        };
-      },
-    });
+  const journal = box.journal();
+  journal[DISPATCH].completedAction = {
+    name: 'dispose-resources', status: 'pending', trigger: 'result',
+    at: new Date().toISOString(), eventId: null,
+  };
+  box.writeJournal(journal);
 
-    // Now simulate settle.js rewriting with a changed verdict — should preserve completedAction
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        // settle.js: if entry exists and verdict differs, rewrite but preserve completedAction
-        const existing = journal['ctx-verdict'];
-        journal['ctx-verdict'] = {
-          verdict: 'VERDICT_CHANGED', // different verdict
-          evidence: { workerDone: { dispatchId: 'ctx-verdict' } },
-        };
-        // B1 fix: preserve completedAction
-        if (existing && existing.completedAction) {
-          journal['ctx-verdict'].completedAction = existing.completedAction;
-        }
-      },
-    });
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(box.stopCalls(), 0, 'остановка повторена после обрыва');
+  assert.equal(box.journal()[DISPATCH].completedAction.status, 'completed');
+});
 
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+test('обрыв после остановки: исход неизвестен — эскалация без повторной остановки', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'running', null)]);
+  runSettle(box, settleArgs(box));
 
-    // completedAction must still be present
-    assert.ok(journal['ctx-verdict'].completedAction, 'completedAction must be preserved after verdict change');
-    assert.equal(journal['ctx-verdict'].completedAction.status, 'completed');
-    // But the verdict changed
-    assert.equal(journal['ctx-verdict'].verdict, 'VERDICT_CHANGED');
+  const journal = box.journal();
+  journal[DISPATCH].completedAction = {
+    name: 'dispose-resources', status: 'pending', trigger: 'result',
+    at: new Date().toISOString(), eventId: null,
+  };
+  box.writeJournal(journal);
 
-    // Re-dispatch should be code 0 (no-op, already completed)
-    const result = guard.disposeResources({
-      dispatchId: 'ctx-verdict',
-      runId: 'run-verdict',
-      taskId: 'task-verdict',
-      worktree: join(stateDir, 'worktree'),
-      repoKey: 'default',
-    });
-    assert.equal(result.code, 0, 're-dispatch after verdict change should be code 0');
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /the stop is not repeated/);
+  assert.equal(box.stopCalls(), 0);
+  assert.equal(box.journal()[DISPATCH].completedAction.status, 'pending');
 });
 
 // ---------------------------------------------------------------------------
-// Mandatory test 4: Обрыв между остановкой и записью — pending, next run checks dispatch
+// 8. Ordinary interruption releases the lock
 // ---------------------------------------------------------------------------
 
-test('M4: pending state — next run: confirmed completion → 0, unknown → 5', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
+test('SIGTERM удерживающему процессу освобождает блокировку', {
+  skip: process.platform === 'win32'
+    ? 'Windows не доставляет SIGTERM обработчику Node; там восстановление операторское, см. RECOVERY_AFTER_CRASH'
+    : false,
+}, async (t) => {
+  const box = sandbox(t, []);
+  const lockDir = join(box.stateDir, 'settlements-guard', 'lock');
 
-  try {
-    // Create entry with pending completedAction (simulating crash between stop and write)
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-crash'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          completedAction: {
-            name: 'dispose-resources',
-            status: 'pending',
-            at: new Date().toISOString(),
-          },
-          evidence: { workerDone: { dispatchId: 'ctx-crash' } },
-        };
-      },
-    });
+  const holder = await startHolder(box);
+  assert.ok(existsSync(lockDir), 'блокировка не взята');
 
-    const stubDir = join(stateDir, 'crash-stub');
-    mkdirSync(stubDir, { recursive: true });
+  await new Promise((resolve) => {
+    holder.on('exit', resolve);
+    holder.kill('SIGTERM');
+  });
 
-    // Case A: confirmed completion → should transition to completed
-    {
-      const confirmedPath = join(stubDir, 'confirmed.mjs');
-      writeFileSync(confirmedPath, `
-        import { readFileSync, appendFileSync } from 'node:fs';
-        const argv = process.argv.slice(2);
-        const subCmd = argv.length > 1 ? argv[1] : '';
-        if (subCmd === 'worker-list') {
-          // Dispatch is confirmed finished
-          process.stdout.write(JSON.stringify({
-            result: { workers: [{ dispatchId: 'ctx-crash', taskId: 'task-crash', dispatchStatus: 'stopped' }] }
-          }) + '\\n');
-        }
-        process.exit(0);
-      `, 'utf8');
+  assert.equal(existsSync(lockDir), false, 'штатное прерывание оставило блокировку');
 
-      process.env.SETTLE_ORCA_EXEC = process.execPath;
-      process.env.SETTLE_ORCA_PREFIX_ARGS_JSON = JSON.stringify([confirmedPath]);
-      try {
-        const result = guard.disposeResources({
-          dispatchId: 'ctx-crash',
-          runId: 'run-crash',
-          taskId: 'task-crash',
-          worktree: join(stateDir, 'worktree'),
-          repoKey: 'default',
-        });
-        assert.equal(result.code, 0, 'confirmed pending recovery should return 0');
-
-        // Verify completedAction is now 'completed'
-        const journalPath = join(stateDir, 'default', 'settlements.json');
-        const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-        assert.equal(journal['ctx-crash'].completedAction.status, 'completed');
-      } finally {
-        delete process.env.SETTLE_ORCA_EXEC;
-        delete process.env.SETTLE_ORCA_PREFIX_ARGS_JSON;
-      }
-    }
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Mandatory test 5: Дедлайн — остановка по дедлайну оставляет settled untouched
-// ---------------------------------------------------------------------------
-
-test('M5: deadline leaves verdict unsettled, no worker_done faked', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
-
-  try {
-    // Settle.js writes the entry with deadlineExceeded=true and verdict=NO_WORK_UNSETTLED
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-deadline'] = {
-          verdict: 'NO_WORK_UNSETTLED',
-          deadlineExceeded: true,
-          evidence: {
-            workerDone: { found: false, recordFound: false, status: null },
-          },
-        };
-      },
-    });
-
-    // disposeResources should NOT fake worker_done or change the verdict
-    const result = guard.disposeResources({
-      dispatchId: 'ctx-deadline',
-      runId: 'run-deadline',
-      taskId: 'task-deadline',
-      worktree: join(stateDir, 'worktree'),
-      repoKey: 'default',
-    });
-
-    // No evidence.workerDone.found → no ownership → code 5 (escalation)
-    assert.equal(result.code, 5);
-
-    // The verdict in the journal stays as-is (unsettled)
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-    assert.equal(journal['ctx-deadline'].verdict, 'NO_WORK_UNSETTLED');
-    assert.ok(journal['ctx-deadline'].deadlineExceeded);
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Mandatory test 6: Сигнал — SIGTERM снимает защиту
-// ---------------------------------------------------------------------------
-
-test('M6: SIGTERM during lock acquisition releases lock for next process', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
-
-  try {
-    // We can't truly signal a synchronous process, but we can verify that
-    // after a process dies, the lock is released. The guard module doesn't
-    // hold locks across process boundaries — each invocation acquires fresh.
-    // This test verifies the lock behavior: acquire → release → re-acquire works.
-
-    const { stateDir: inner, cleanup: innerCleanup } = makeStateDir();
-    process.env.COORDINATOR_STATE_DIR = inner;
-
-    try {
-      // First acquire succeeds
-      const r1 = guard.guardedSettlements({
-        repoKey: 'default',
-        lockRequired: true,
-        mutateFn: (journal) => {
-          journal['test-1'] = { ok: true };
-        },
-      });
-      assert.equal(r1.code, 0);
-
-      // Second acquire also succeeds (lock released after each guarded call)
-      const r2 = guard.guardedSettlements({
-        repoKey: 'default',
-        lockRequired: true,
-        mutateFn: (journal) => {
-          journal['test-2'] = { ok: true };
-        },
-      });
-      assert.equal(r2.code, 0);
-
-      // Both records present
-      const journalPath = join(inner, 'default', 'settlements.json');
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      assert.ok(journal['test-1']);
-      assert.ok(journal['test-2']);
-    } finally {
-      delete process.env.COORDINATOR_STATE_DIR;
-      innerCleanup();
-    }
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Mandatory test 7: Повреждённый журнал — не перезаписан, исход эскалация
-// ---------------------------------------------------------------------------
-
-test('M7: corrupt journal not overwritten, exit code 5 (escalation)', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
-
-  try {
-    // Create a valid entry first
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-good'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          completedAction: { name: 'dispose-resources', status: 'completed' },
-        };
-      },
-    });
-
-    // Now corrupt the journal file
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    writeFileSync(journalPath, '{corrupted json data...', 'utf8');
-
-    // Attempting disposeResources on the corrupt journal should fail with 5
-    const result = guard.disposeResources({
-      dispatchId: 'ctx-good',
-      runId: 'run-good',
-      taskId: 'task-good',
-      worktree: join(stateDir, 'worktree'),
-      repoKey: 'default',
-    });
-
-    assert.equal(result.code, 5, 'corrupt journal should return escalation');
-
-    // The journal should NOT have been overwritten (no new garbage written)
-    // After a successful guarded operation, the file would be valid JSON.
-    // Since we got code 5, no write happened.
-    // Verify by attempting a fresh guarded write — should succeed (corrupt only
-    // affects reads; the write under lock overwrites)
-    // Actually: guardedSettlements reads the corrupt file, gets {}, but we can
-    // verify the old data is gone. The key assertion: disposeResources doesn't
-    // overwrite corrupt journal — which it doesn't because it can't even read
-    // the entry, so it returns code 5 without touching the file.
-    // After corruption, the old entry is lost but not overwritten.
-    // Let's verify the file is still corrupt (unchanged):
-    const content = readFileSync(journalPath, 'utf8');
-    assert.ok(content.includes('corrupted'), 'journal should remain corrupt (untouched)');
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Mandatory test 8: Принадлежность не подтверждена — эскалация, stop не вызван
-// ---------------------------------------------------------------------------
-
-test('M8: ownership not confirmed → escalation, stop not called', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
-
-  try {
-    // Entry where workerDone.dispatchId doesn't match the dispatchId
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-mismatch'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          evidence: {
-            workerDone: { dispatchId: 'ctx-other' }, // doesn't match 'ctx-mismatch'
-          },
-        };
-      },
-    });
-
-    const result = guard.disposeResources({
-      dispatchId: 'ctx-mismatch',
-      runId: 'run-mismatch',
-      taskId: 'task-mismatch',
-      worktree: join(stateDir, 'worktree'),
-      repoKey: 'default',
-    });
-
-    assert.equal(result.code, 5, 'mismatched dispatchId should return escalation');
-    assert.ok(result.body.includes('ownership'), 'error should mention ownership');
-
-    // No completedAction should be recorded
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-    assert.equal(journal['ctx-mismatch'].completedAction, undefined);
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// B1: settle.js preserves completedAction on re-write
-// ---------------------------------------------------------------------------
-
-test('B1: settle.js re-write preserves completedAction — through settle.js', async () => {
-  const { stateDir, cleanup } = makeStateDir();
-  after(cleanup);
-  process.env.COORDINATOR_STATE_DIR = stateDir;
-
-  try {
-    // Write an entry with completedAction (as if disposal was done)
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        journal['ctx-b1'] = {
-          verdict: 'WORK_PRESENT_UNSETTLED',
-          completedAction: {
-            name: 'dispose-resources',
-            verdict: 'WORK_PRESENT_UNSETTLED',
-            status: 'completed',
-            at: new Date().toISOString(),
-            eventId: null,
-          },
-        };
-      },
-    });
-
-    // Now simulate settle.js rewriting with a different verdict.
-    // The settle.js mutateFn (after B1 fix) preserves completedAction.
-    guard.guardedSettlements({
-      repoKey: 'default',
-      lockRequired: true,
-      mutateFn: (journal) => {
-        const entry = journal['ctx-b1'];
-        let existingEntry = null;
-        try { existingEntry = journal['ctx-b1']; } catch { /* */ }
-
-        if (existingEntry && existingEntry.completedAction) {
-          // settle.js preserves completedAction
-          journal['ctx-b1'] = {
-            verdict: 'VERDICT_CHANGED',
-            evidence: entry?.evidence || {},
-          };
-          journal['ctx-b1'].completedAction = existingEntry.completedAction;
-        } else {
-          journal['ctx-b1'] = {
-            verdict: 'VERDICT_CHANGED',
-            evidence: entry?.evidence || {},
-          };
-        }
-      },
-    });
-
-    const journalPath = join(stateDir, 'default', 'settlements.json');
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-
-    assert.ok(journal['ctx-b1'].completedAction, 'completedAction must be preserved');
-    assert.equal(journal['ctx-b1'].verdict, 'VERDICT_CHANGED');
-  } finally {
-    delete process.env.COORDINATOR_STATE_DIR;
-  }
+  const writer = join(box.dir, 'writer.js');
+  writeFileSync(writer, WRITER_SOURCE, 'utf8');
+  const after = spawnSync(process.execPath, [writer, 'ctx_after_signal', '10'], {
+    env: box.env, encoding: 'utf8',
+  });
+  assert.equal(after.stdout, '0', 'следующая запись не смогла взять блокировку');
 });

@@ -68,7 +68,7 @@ test('R1: two sequential writes to the same journal — both records present', a
 // R1: lock cannot be acquired → journal not touched
 // ---------------------------------------------------------------------------
 
-test('R1: lock busy returns code 3 and does not modify journal', async () => {
+test('R1: lock busy returns code 23 and does not modify journal', async () => {
   const { stateDir, cleanup } = makeStateDir();
 
   // Write initial journal content
@@ -101,7 +101,7 @@ test('R1: lock busy returns code 3 and does not modify journal', async () => {
         },
       });
 
-      assert.equal(result.code, 3, 'should return LOCK_BUSY code');
+      assert.equal(result.code, 23, 'should return LOCK_BUSY code');
       assert.equal(result.journal, null, 'journal should be null');
     } finally {
       delete process.env.COORDINATOR_STATE_DIR;
@@ -334,7 +334,7 @@ test('R3: disposeResources with stub → code 0, action recorded', async () => {
       mutateFn: (journal) => {
         journal['ctx-ora'] = {
           verdict: 'WORK_PRESENT_UNSETTLED',
-          evidence: { workerDone: { dispatchId: 'ctx-ora' } },
+          evidence: { workerDone: { dispatchId: 'ctx-ora', taskId: 'task-ora' } },
         };
       },
     });
@@ -407,7 +407,7 @@ test('R3: disposeResources failing stub → code 5 (escalation)', async () => {
       mutateFn: (journal) => {
         journal['ctx-fail'] = {
           verdict: 'WORK_PRESENT_UNSETTLED',
-          evidence: { workerDone: { dispatchId: 'ctx-fail' } },
+          evidence: { workerDone: { dispatchId: 'ctx-fail', taskId: 'task-fail' } },
         };
       },
     });
