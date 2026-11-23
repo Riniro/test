@@ -317,7 +317,6 @@ function watch(args) {
 
     // Early-stop check: both independently confirmed
     if (foundWorkerListSucceeded && foundInboxVerified) break;
-    if (foundWorkerListSucceeded) break;
 
     // Sleep until next poll (no busy-wait)
     const now = Date.now();

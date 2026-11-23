@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const SETTLE = join(__dirname, '..', 'tools', 'coordinator', 'settle.js');
@@ -38,17 +38,19 @@ function createOrcaStub(dir, workerListJson, inboxJson) {
     mkdirSync(dir, { recursive: true });
   }
   const stubPath = join(dir, 'stub.js');
-  // Ensure wlJson and inJson are raw JSON strings — write them with escaped double quotes
+  // Ensure wlJson and inJson are raw JSON strings — embed via base64 to avoid
+  // escaping issues with nested quotes in real Orca payloads.
   const wlRaw = typeof workerListJson === 'string' ? workerListJson : JSON.stringify(workerListJson);
   const inRaw = inboxJson !== undefined ? (typeof inboxJson === 'string' ? inboxJson : JSON.stringify(inboxJson)) : '';
-  // Escape double-quotes for embedding in JS single-quoted string
-  const esc = s => '"' + s.replace(/"/g, '\\"') + '"';
+  // Encode as base64 then decode at runtime — zero escaping issues
+  const wlB64 = Buffer.from(wlRaw).toString('base64');
+  const inB64 = Buffer.from(inRaw).toString('base64');
   writeFileSync(stubPath, [
     "const args = process.argv.slice(2);",
     "const subcmd = args.length > 1 ? args[1] : '';",
-    "if (subcmd === 'inbox') { process.stdout.write(" + esc(inRaw) + "); }",
-    "else { process.stdout.write(" + esc(wlRaw) + "); }",
-  ].join(String.fromCharCode(10)), 'utf8');
+    "if (subcmd === 'inbox') { process.stdout.write(Buffer.from('" + inB64 + "', 'base64').toString('utf8')); }",
+    "else { process.stdout.write(Buffer.from('" + wlB64 + "', 'base64').toString('utf8')); }",
+  ].join('\n'), 'utf8');
   return {
     SETTLE_ORCA_EXEC: process.execPath,
     SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]),
@@ -618,6 +620,145 @@ test('D5: inbox message but dispatch not succeeded → not SETTLED_BY_WORKER', (
   const out = JSON.parse(r.stdout);
   strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
   strictEqual(out.evidence.workerDone.found, false);
+});
+
+// ---------------------------------------------------------------------------
+// B1 (repeat): Fixture test — worker-list with two workers, inbox with one matching
+// ---------------------------------------------------------------------------
+
+test('B1: fixture test — worker A (ready) and worker B (succeeded) show different outcomes', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-b1-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktreeA = join(dir, 'worktree-a');
+  createGitRepo(worktreeA);
+  const worktreeB = join(dir, 'worktree-b');
+  createGitRepo(worktreeB);
+
+  // Fixture: two workers — A (ready) and B (succeeded)
+  const fixturePath = join(__dirname, 'fixtures', 'orca', 'worker-list-a-succeeded-b-live.json');
+  // Trim trailing newline — fixtures may have one, which breaks embedded JS strings
+  const fixtureRaw = readFileSync(fixturePath, 'utf8').trimEnd();
+
+  // Fixture: inbox with one worker_done (for worker B)
+  const inboxPath = join(__dirname, 'fixtures', 'orca', 'raw-inbox-run_caba172c9fa2.json');
+  const inboxRaw = readFileSync(inboxPath, 'utf8').trimEnd();
+
+  // Worker A: dispatchId=ctx_15e93add3d45, taskId=task_ef5ae9a2eb98, state=ready
+  // — should NOT settle (state is ready, no matching inbox)
+  const toolsDirA = join(dir, 'bin-b1a');
+  const stubEnvA = createOrcaStub(toolsDirA, fixtureRaw, inboxRaw);
+
+  const rA = spawnSettle([
+    '--run', 'run_caba172c9fa2',
+    '--task', 'task_ef5ae9a2eb98',
+    '--dispatch', 'ctx_15e93add3d45',
+    '--worktree', worktreeA,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], stubEnvA);
+
+  strictEqual(rA.status, 20);
+  const outA = JSON.parse(rA.stdout);
+  // Worker A is in "ready" state (not finished), has a commit → WORK_PRESENT_UNSETTLED
+  strictEqual(outA.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(outA.evidence.workerDone.found, false);
+  strictEqual(outA.evidence.workerList.state, 'ready');
+  strictEqual(outA.evidence.workerList.recordFound, true);
+
+  // Worker B: dispatchId=ctx_c9bcad93c1b4, taskId=task_03778b11545c, state=succeeded
+  // — should settle (state is succeeded, inbox has matching worker_done)
+  const toolsDirB = join(dir, 'bin-b1b');
+  const stubEnvB = createOrcaStub(toolsDirB, fixtureRaw, inboxRaw);
+
+  const rB = spawnSettle([
+    '--run', 'run_caba172c9fa2',
+    '--task', 'task_03778b11545c',
+    '--dispatch', 'ctx_c9bcad93c1b4',
+    '--worktree', worktreeB,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], stubEnvB);
+
+  strictEqual(rB.status, 0);
+  const outB = JSON.parse(rB.stdout);
+  strictEqual(outB.verdict, 'SETTLED_BY_WORKER');
+  strictEqual(outB.evidence.workerDone.found, true);
+  strictEqual(outB.evidence.workerList.state, 'succeeded');
+  strictEqual(outB.evidence.workerList.recordFound, true);
+  strictEqual(outB.evidence.inboxVerified, true);
+});
+
+// ---------------------------------------------------------------------------
+// B2: settlement.js — dispatch status succeeded → SETTLED_BY_WORKER
+// ---------------------------------------------------------------------------
+
+test('B2: dispatch status succeeded → SETTLED_BY_WORKER', async () => {
+  const { decide } = await import('../tools/coordinator/settlement.js');
+
+  const result = decide({
+    dispatch: {
+      workerDone: {
+        taskId: 'task-1',
+        dispatchId: 'ctx-1',
+        status: 'succeeded',
+      },
+      expectedTaskId: 'task-1',
+      expectedDispatchId: 'ctx-1',
+      status: 'succeeded',
+    },
+    work: { commit: 'abc123' },
+    tests: { ran: true, passed: true },
+  });
+
+  strictEqual(result.verdict, 'SETTLED_BY_WORKER');
+});
+
+// ---------------------------------------------------------------------------
+// B3: Early break fix — polling waits for BOTH signals
+// ---------------------------------------------------------------------------
+
+test('B3: polling waits for both signals — inbox arrives after worker-list', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-b3-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree-b3');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-b3');
+  mkdirSync(toolsDir, { recursive: true });
+
+  const stubPath = join(toolsDir, 'stub-b3.js');
+  const workerListJson = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx-b3","taskId":"task-b3","state":"succeeded"}]}}';
+  const inboxJson = '{"ok":true,"result":{"messages":[{"id":"msg-b3","type":"worker_done","to":"run:run-b3","payload":{"taskId":"task-b3","dispatchId":"ctx-b3"}}]}}';
+  const wlB64 = Buffer.from(workerListJson).toString('base64');
+  const inB64 = Buffer.from(inboxJson).toString('base64');
+  writeFileSync(stubPath, [
+    "const args = process.argv.slice(2);",
+    "const subcmd = args.length > 1 ? args[1] : '';",
+    "if (subcmd === 'inbox') { process.stdout.write(Buffer.from('" + inB64 + "', 'base64').toString('utf8')); }",
+    "else { process.stdout.write(Buffer.from('" + wlB64 + "', 'base64').toString('utf8')); }",
+  ].join('\n'), 'utf8');
+
+  const stubEnv = {
+    SETTLE_ORCA_EXEC: process.execPath,
+    SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]),
+  };
+
+  const r = spawnSettle([
+    '--run', 'run-b3',
+    '--task', 'task-b3',
+    '--dispatch', 'ctx-b3',
+    '--worktree', worktree,
+    '--deadline-ms', '5000',
+    '--poll-ms', '1000',
+  ], stubEnv);
+
+  strictEqual(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'SETTLED_BY_WORKER');
+  strictEqual(out.evidence.workerDone.found, true);
+  strictEqual(out.evidence.inboxVerified, true);
 });
 
 // ---------------------------------------------------------------------------
