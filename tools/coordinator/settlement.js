@@ -2,7 +2,7 @@
 // Pure function: no filesystem, network, or process access.
 // Does not print to stdout/stderr. Does not mutate inputs.
 
-const FINISHED_STATUSES = new Set(['completed', 'failed', 'stopped', 'abandoned']);
+const FINISHED_STATUSES = new Set(['completed', 'failed', 'stopped', 'abandoned', 'succeeded']);
 
 /**
  * @param {object}  params

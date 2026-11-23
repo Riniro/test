@@ -144,29 +144,72 @@ function collectWorkerDone(runId, taskId, dispatchId) {
     });
 
     if (result.error || result.status !== 0) {
-      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+      return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     }
 
     const out = result.stdout;
     if (typeof out !== 'string' || out.trim().length === 0) {
-      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+      return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     }
 
     const list = parseWorkerList(out);
     const rec = list.find(r => r.dispatchId === dispatchId && r.taskId === taskId);
-    if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    if (!rec) return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     return {
       found: true,
       recordFound: true,
-      status: rec.workerState || null,
-      dispatchStatus: rec.dispatchStatus || null,
+      state: rec.state || null,
       raw: rec,
       taskId,
       dispatchId,
     };
   } catch {
     // spawnSync does not throw; unreachable but kept for safety
-    return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
+  }
+}
+
+/**
+ * Read the inbox for a run and look for a worker_done message whose payload
+ * matches the expected taskId and dispatchId.  Uses `inbox --terminal run:<runId>`
+ * which is the only method that does not consume messages.
+ *
+ * @param {string} runId
+ * @returns {object|null}  { type, to, payload: { taskId, dispatchId }, id } or null
+ */
+function collectInbox(runId) {
+  try {
+    const launch = resolveOrcaLaunch();
+    const result = spawnSync(launch.executable, [
+      ...launch.prefixArgs,
+      'orchestration', 'inbox', '--terminal', 'run:' + runId, '--limit', '50', '--json',
+    ], {
+      encoding: 'utf8',
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    if (result.error || result.status !== 0) return null;
+
+    const out = result.stdout;
+    if (typeof out !== 'string' || out.trim().length === 0) return null;
+
+    const data = JSON.parse(out);
+    const messages = data?.result?.messages || [];
+
+    for (const msg of messages) {
+      if (msg.type !== 'worker_done') continue;
+      if (msg.to !== ('run:' + runId)) continue;
+      const p = msg.payload;
+      if (p && typeof p === 'object' && p.taskId && p.dispatchId) {
+        return { type: msg.type, to: msg.to, payload: p, id: msg.id };
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -241,36 +284,40 @@ function watch(args) {
   const deadline = start + args.deadlineMs;
   let deadlineExceeded = false;
 
-  let workerDoneResult = null;
-  let dispatchStatus = null;
+  let workerListResult = null;
+  let inboxMessage = null;
   let commit = null;
   let tests = { ran: false };
 
-  let foundWorkerDone = false;
-  let foundDispatchFinished = false;
+  let foundWorkerListSucceeded = false;
+  let foundInboxVerified = false;
 
   while (Date.now() < deadline) {
-    // Collect worker_done
-    if (!foundWorkerDone) {
+    // Collect worker-list status independently
+    if (!foundWorkerListSucceeded) {
       const result = collectWorkerDone(args.run, args.task, args.dispatch);
-      workerDoneResult = result;
-      dispatchStatus = result.dispatchStatus;
+      workerListResult = result;
 
-      // recordFound = a record was found; found = worker_done actually succeeded
-      if (result.recordFound && result.status === 'succeeded') {
-        foundWorkerDone = true;
-      } else if (result.recordFound && result.status && result.status !== 'succeeded') {
-        // Dispatch is not succeeded — check if its own status is finished
-        if (result.dispatchStatus && ['completed', 'failed', 'stopped', 'abandoned'].includes(result.dispatchStatus)) {
-          foundDispatchFinished = true;
-          foundWorkerDone = true; // we have enough info
+      if (result.recordFound && result.state === 'succeeded') {
+        foundWorkerListSucceeded = true;
+      }
+    }
+
+    // Collect inbox message independently
+    if (!foundInboxVerified) {
+      const msg = collectInbox(args.run);
+      if (msg) {
+        const p = msg.payload;
+        if (p && p.taskId === args.task && p.dispatchId === args.dispatch) {
+          inboxMessage = msg;
+          foundInboxVerified = true;
         }
       }
     }
 
-    // Early-stop check
-    if (foundWorkerDone && foundDispatchFinished) break;
-    if (foundWorkerDone) break; // worker_done succeeded is enough
+    // Early-stop check: both independently confirmed
+    if (foundWorkerListSucceeded && foundInboxVerified) break;
+    if (foundWorkerListSucceeded) break;
 
     // Sleep until next poll (no busy-wait)
     const now = Date.now();
@@ -293,33 +340,43 @@ function watch(args) {
   // Run tests once after polling
   tests = collectTests(args.tests);
 
-  // Build evidence
+  // Build evidence for output
+  const workerDoneFound = (workerListResult?.state === 'succeeded') &&
+                          inboxMessage !== null &&
+                          inboxMessage.type === 'worker_done' &&
+                          inboxMessage.to === ('run:' + args.run) &&
+                          inboxMessage.payload &&
+                          inboxMessage.payload.taskId === args.task &&
+                          inboxMessage.payload.dispatchId === args.dispatch;
+
   const evidence = {
     workerDone: {
-      found: (workerDoneResult?.status === 'succeeded' &&
-              workerDoneResult?.recordFound &&
-              workerDoneResult?.taskId === args.task &&
-              workerDoneResult?.dispatchId === args.dispatch),
-      recordFound: workerDoneResult?.recordFound || false,
-      status: workerDoneResult?.status || null,
-      taskId: workerDoneResult?.taskId || args.task,
-      dispatchId: workerDoneResult?.dispatchId || args.dispatch,
-      workerState: workerDoneResult?.status || null,
+      found: workerDoneFound,
+      recordFound: workerListResult?.recordFound || false,
+      status: inboxMessage ? 'worker_done' : null,
+      taskId: inboxMessage?.payload?.taskId || args.task,
+      dispatchId: inboxMessage?.payload?.dispatchId || args.dispatch,
     },
-    dispatchStatus: dispatchStatus,
+    workerList: {
+      state: workerListResult?.state || null,
+      recordFound: workerListResult?.recordFound || false,
+    },
+    inboxVerified: foundInboxVerified,
     commit: commit,
     tests: tests,
   };
 
   // Build dispatch/work/tests for decide()
-  // workerDone is non-null ONLY when the worker actually succeeded.
-  const workerDoneObj = (workerDoneResult?.recordFound && workerDoneResult?.status === 'succeeded')
+  // workerDone: confirmed only when inbox message matches AND worker-list says succeeded
+  const workerDoneObj = (workerListResult?.state === 'succeeded' && workerDoneFound)
     ? {
         taskId: args.task,
         dispatchId: args.dispatch,
-        status: workerDoneResult.status,
+        status: 'succeeded',
       }
     : null;
+
+  const dispatchStatus = workerListResult?.state || null;
 
   const dispatchObj = {
     workerDone: workerDoneObj,

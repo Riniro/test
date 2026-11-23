@@ -33,12 +33,22 @@ function createGitRepo(dir) {
  * needs no executable bit and no platform-specific wrapper.
  * Returns the environment that makes settle.js launch it instead of orca.
  */
-function createOrcaStub(dir, json) {
+function createOrcaStub(dir, workerListJson, inboxJson) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
   const stubPath = join(dir, 'stub.js');
-  writeFileSync(stubPath, 'process.stdout.write(' + JSON.stringify(json) + ');' + String.fromCharCode(10), 'utf8');
+  // Ensure wlJson and inJson are raw JSON strings — write them with escaped double quotes
+  const wlRaw = typeof workerListJson === 'string' ? workerListJson : JSON.stringify(workerListJson);
+  const inRaw = inboxJson !== undefined ? (typeof inboxJson === 'string' ? inboxJson : JSON.stringify(inboxJson)) : '';
+  // Escape double-quotes for embedding in JS single-quoted string
+  const esc = s => '"' + s.replace(/"/g, '\\"') + '"';
+  writeFileSync(stubPath, [
+    "const args = process.argv.slice(2);",
+    "const subcmd = args.length > 1 ? args[1] : '';",
+    "if (subcmd === 'inbox') { process.stdout.write(" + esc(inRaw) + "); }",
+    "else { process.stdout.write(" + esc(wlRaw) + "); }",
+  ].join(String.fromCharCode(10)), 'utf8');
   return {
     SETTLE_ORCA_EXEC: process.execPath,
     SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]),
@@ -205,8 +215,8 @@ test('stdout is parseable JSON without cleanup', (t) => {
   createGitRepo(worktree);
 
   const toolsDir = join(dir, 'bin-28');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_parse","taskId":"task_parse","workerState":"succeeded","dispatchStatus":"completed"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_parse","taskId":"task_parse","state":"succeeded"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json, null);
 
   const r = spawnSettle([
     '--run', 'run-json-parse',
@@ -269,42 +279,41 @@ test('settle.js source does not reference lifecycle commands', () => {
 // ---------------------------------------------------------------------------
 
 test('parse data.result.workers and yield SETTLED_BY_WORKER', () => {
-  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","state":"succeeded"}]}}';
   const workers = settleModule.parseWorkerList(raw);
   strictEqual(workers.length, 1);
   strictEqual(workers[0].dispatchId, 'd1');
   strictEqual(workers[0].taskId, 't1');
-  strictEqual(workers[0].workerState, 'succeeded');
-  strictEqual(workers[0].dispatchStatus, 'completed');
+  strictEqual(workers[0].state, 'succeeded');
 });
 
 // ---------------------------------------------------------------------------
-// 32. Дефект 2: stopped workerState — не SETTLED_BY_WORKER
+// 32. Дефект 2: stopped state — not SETTLED_BY_WORKER
 // ---------------------------------------------------------------------------
 
 test('stopped workerState → not SETTLED_BY_WORKER', () => {
-  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","state":"stopped"}]}}';
   const workers = settleModule.parseWorkerList(raw);
   strictEqual(workers.length, 1);
-  strictEqual(workers[0].workerState, 'stopped');
+  strictEqual(workers[0].state, 'stopped');
 });
 
 // ---------------------------------------------------------------------------
-// 33. evidence.dispatchStatus присутствует в обоих случаях
+// 33. state присутствует в обоих случаях
 // ---------------------------------------------------------------------------
 
-test('evidence.dispatchStatus present when worker succeeded', () => {
-  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"succeeded","dispatchStatus":"completed"}]}}';
+test('state present when worker succeeded', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","state":"succeeded"}]}}';
   const workers = settleModule.parseWorkerList(raw);
   strictEqual(workers.length, 1);
-  strictEqual(workers[0].dispatchStatus, 'completed');
+  strictEqual(workers[0].state, 'succeeded');
 });
 
-test('evidence.dispatchStatus present when worker stopped', () => {
-  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","workerState":"stopped","dispatchStatus":"stopped"}]}}';
+test('state present when worker stopped', () => {
+  const raw = '{"ok":true,"result":{"workers":[{"dispatchId":"d1","taskId":"t1","state":"stopped"}]}}';
   const workers = settleModule.parseWorkerList(raw);
   strictEqual(workers.length, 1);
-  strictEqual(workers[0].dispatchStatus, 'stopped');
+  strictEqual(workers[0].state, 'stopped');
 });
 
 // ---------------------------------------------------------------------------
@@ -319,8 +328,8 @@ test('stopped dispatch + commit in worktree → WORK_PRESENT_UNSETTLED, exit 20'
   createGitRepo(worktree);
 
   const toolsDir = join(dir, 'bin-34');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","workerState":"stopped","dispatchStatus":"stopped"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_stopped","taskId":"task_stopped","state":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json, null);
 
   const r = spawnSettle([
     '--run', 'run-stopped',
@@ -356,8 +365,8 @@ test('stopped dispatch + empty worktree → NO_WORK_UNSETTLED, exit 21', (t) => 
   // No commit — empty repo
 
   const toolsDir = join(dir, 'bin-35');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","workerState":"stopped","dispatchStatus":"stopped"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_empty","taskId":"task_empty","state":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json, null);
 
   const r = spawnSettle([
     '--run', 'run-empty',
@@ -383,8 +392,8 @@ test('nonexistent worktree → UNVERIFIABLE, exit 22, commit=null', (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const toolsDir = join(dir, 'bin-36');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","workerState":"stopped","dispatchStatus":"stopped"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_miss","taskId":"task_miss","state":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json, null);
 
   const r = spawnSettle([
     '--run', 'run-miss',
@@ -413,8 +422,8 @@ test('stopped workerState → found=false, recordFound=true', (t) => {
   createGitRepo(worktree);
 
   const toolsDir = join(dir, 'bin-37');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","workerState":"stopped","dispatchStatus":"stopped"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_f","taskId":"task_f","state":"stopped"}]}}';
+  const stubEnv = createOrcaStub(toolsDir, json, null);
 
   const r = spawnSettle([
     '--run', 'run-f',
@@ -443,8 +452,9 @@ test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, ex
   createGitRepo(worktree);
 
   const toolsDir = join(dir, 'bin-38');
-  const json = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","workerState":"succeeded","dispatchStatus":"completed"}]}}';
-  const stubEnv = createOrcaStub(toolsDir, json);
+  const workerListJson = '{"ok":true,"result":{"workers":[{"dispatchId":"ctx_ok","taskId":"task_ok","state":"succeeded"}]}}';
+  const inboxJson = {"ok":true,"result":{"messages":[{"id":"msg_ok","type":"worker_done","to":"run:run-ok","payload":{"taskId":"task_ok","dispatchId":"ctx_ok"}}]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
 
   const r = spawnSettle([
     '--run', 'run-ok',
@@ -460,6 +470,154 @@ test('succeeded worker + finished dispatch → found=true, SETTLED_BY_WORKER, ex
   strictEqual(out.verdict, 'SETTLED_BY_WORKER');
   strictEqual(out.evidence.workerDone.found, true);
   strictEqual(out.evidence.workerDone.recordFound, true);
+});
+
+// ---------------------------------------------------------------------------
+// D3: Wrong runId, taskId, dispatchId — each one → not SETTLED_BY_WORKER
+// ---------------------------------------------------------------------------
+
+test('D3a: inbox message with wrong runId → not settled', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-d3a-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-d3a');
+  const workerListJson = {ok:true,result:{workers:[{dispatchId:'ctx_ok',taskId:'task_ok',state:'succeeded'}]}};
+  // inbox message to run:WRONG_ID instead of run:run-ok
+  const inboxJson = {ok:true,result:{messages:[{id:'m1',type:'worker_done',to:'run:WRONG_ID',payload:{taskId:'task_ok',dispatchId:'ctx_ok'}}]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '2000',
+    '--poll-ms', '500',
+  ], stubEnv);
+
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(out.evidence.workerDone.found, false);
+});
+
+test('D3b: inbox message with wrong taskId → not settled', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-d3b-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-d3b');
+  const workerListJson = {ok:true,result:{workers:[{dispatchId:'ctx_ok',taskId:'task_ok',state:'succeeded'}]}};
+  // inbox message with wrong taskId
+  const inboxJson = {ok:true,result:{messages:[{id:'m1',type:'worker_done',to:'run:run-ok',payload:{taskId:'task_WRONG',dispatchId:'ctx_ok'}}]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '2000',
+    '--poll-ms', '500',
+  ], stubEnv);
+
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(out.evidence.workerDone.found, false);
+});
+
+test('D3c: inbox message with wrong dispatchId → not settled', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-d3c-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-d3c');
+  const workerListJson = {ok:true,result:{workers:[{dispatchId:'ctx_ok',taskId:'task_ok',state:'succeeded'}]}};
+  // inbox message with wrong dispatchId
+  const inboxJson = {ok:true,result:{messages:[{id:'m1',type:'worker_done',to:'run:run-ok',payload:{taskId:'task_ok',dispatchId:'ctx_WRONG'}}]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '2000',
+    '--poll-ms', '500',
+  ], stubEnv);
+
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(out.evidence.workerDone.found, false);
+});
+
+// ---------------------------------------------------------------------------
+// D4: state=succeeded, no inbox message → not settled
+// ---------------------------------------------------------------------------
+
+test('D4: succeeded worker but no inbox → not SETTLED_BY_WORKER', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-d4-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-d4');
+  const workerListJson = {ok:true,result:{workers:[{dispatchId:'ctx_ok',taskId:'task_ok',state:'succeeded'}]}};
+  // No inbox messages at all
+  const inboxJson = {ok:true,result:{messages:[]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '2000',
+    '--poll-ms', '500',
+  ], stubEnv);
+
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(out.evidence.workerDone.found, false);
+});
+
+// ---------------------------------------------------------------------------
+// D5: inbox message present but dispatch not succeeded → not settled
+// ---------------------------------------------------------------------------
+
+test('D5: inbox message but dispatch not succeeded → not SETTLED_BY_WORKER', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-d5-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+
+  const toolsDir = join(dir, 'bin-d5');
+  // worker-list shows ready (not succeeded)
+  const workerListJson = {ok:true,result:{workers:[{dispatchId:'ctx_ok',taskId:'task_ok',state:'ready'}]}};
+  // inbox has worker_done message but dispatch is not finished
+  const inboxJson = {ok:true,result:{messages:[{id:'m1',type:'worker_done',to:'run:run-ok',payload:{taskId:'task_ok',dispatchId:'ctx_ok'}}]}};
+  const stubEnv = createOrcaStub(toolsDir, workerListJson, inboxJson);
+
+  const r = spawnSettle([
+    '--run', 'run-ok',
+    '--task', 'task_ok',
+    '--dispatch', 'ctx_ok',
+    '--worktree', worktree,
+    '--deadline-ms', '2000',
+    '--poll-ms', '500',
+  ], stubEnv);
+
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.verdict, 'WORK_PRESENT_UNSETTLED');
+  strictEqual(out.evidence.workerDone.found, false);
 });
 
 // ---------------------------------------------------------------------------
