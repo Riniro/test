@@ -111,12 +111,9 @@ function runSettle(box, args) {
   });
 }
 
-function worker(dispatchId, taskId, state, workerState) {
-  return {
-    dispatchId, taskId, state,
-    workerState: workerState === undefined ? null : workerState,
-    dispatchStatus: state,
-  };
+// Shape of a real `worker-list --json` record: the dispatch state is `state`.
+function worker(dispatchId, taskId, state) {
+  return { dispatchId, taskId, state };
 }
 
 const DISPATCH = 'ctx_mandatory';

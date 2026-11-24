@@ -174,10 +174,22 @@ function collectWorkerDone(runId, taskId, dispatchId) {
  * matches the expected taskId and dispatchId.  Uses `inbox --terminal run:<runId>`
  * which is the only method that does not consume messages.
  *
+ * The match is made inside the queue walk on all three identifiers (run via
+ * `to`, taskId, dispatchId); a worker_done for another task or dispatch is
+ * skipped and the walk continues, so it cannot shadow ours.
+ *
+ * The call is bounded by `timeoutMs`.  If it is cut off, `diag.timedOut` is
+ * set so the caller can tell "inbox call timed out" from "no such letter";
+ * a timed-out call never yields a message.
+ *
  * @param {string} runId
+ * @param {string} taskId
+ * @param {string} dispatchId
+ * @param {number} timeoutMs
+ * @param {{timedOut?: boolean}} [diag]  out-parameter
  * @returns {object|null}  { type, to, payload: { taskId, dispatchId }, id } or null
  */
-function collectInbox(runId) {
+function collectInbox(runId, taskId, dispatchId, timeoutMs, diag = {}) {
   try {
     const launch = resolveOrcaLaunch();
     const result = spawnSync(launch.executable, [
@@ -188,8 +200,13 @@ function collectInbox(runId) {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
+      timeout: timeoutMs,
     });
 
+    if (result.error && result.error.code === 'ETIMEDOUT') {
+      diag.timedOut = true;
+      return null;
+    }
     if (result.error || result.status !== 0) return null;
 
     const out = result.stdout;
@@ -202,7 +219,7 @@ function collectInbox(runId) {
       if (msg.type !== 'worker_done') continue;
       if (msg.to !== ('run:' + runId)) continue;
       const p = msg.payload;
-      if (p && typeof p === 'object' && p.taskId && p.dispatchId) {
+      if (p && typeof p === 'object' && p.taskId === taskId && p.dispatchId === dispatchId) {
         return { type: msg.type, to: msg.to, payload: p, id: msg.id };
       }
     }
@@ -291,6 +308,7 @@ function watch(args) {
 
   let foundWorkerListSucceeded = false;
   let foundInboxVerified = false;
+  let inboxTimedOut = false;
 
   while (Date.now() < deadline) {
     // Collect worker-list status independently
@@ -305,7 +323,10 @@ function watch(args) {
 
     // Collect inbox message independently
     if (!foundInboxVerified) {
-      const msg = collectInbox(args.run);
+      // Bounded by the time left to the deadline (floor keeps the call usable).
+      const diag = {};
+      const msg = collectInbox(args.run, args.task, args.dispatch, Math.max(250, deadline - Date.now()), diag);
+      if (diag.timedOut) inboxTimedOut = true;
       if (msg) {
         const p = msg.payload;
         if (p && p.taskId === args.task && p.dispatchId === args.dispatch) {
@@ -361,6 +382,7 @@ function watch(args) {
       recordFound: workerListResult?.recordFound || false,
     },
     inboxVerified: foundInboxVerified,
+    inboxTimedOut: inboxTimedOut && !foundInboxVerified,
     commit: commit,
     tests: tests,
   };
@@ -394,6 +416,10 @@ function watch(args) {
     tests: tests,
     deadlineExceeded: deadlineExceeded,
   });
+
+  if (inboxTimedOut && !foundInboxVerified) {
+    verdictResult.reasons.push('INBOX_CALL_TIMED_OUT');
+  }
 
   // Determine exit code
   let exitCode = 0;

@@ -57,12 +57,31 @@ function createOrcaStub(dir, workerListJson, inboxJson) {
   };
 }
 
+const isolationDirs = [];
+process.on('exit', () => {
+  for (const d of isolationDirs) {
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 /**
  * Spawn settle.js with an array of argv arguments.
  */
 function spawnSettle(argv, extraEnv) {
   const env = { ...process.env };
   delete env['COORDINATOR_STATE_DIR'];
+  delete env['SETTLE_ORCA_EXEC'];
+  delete env['SETTLE_ORCA_PREFIX_ARGS_JSON'];
+  // Isolation: every child gets its own state dir and, unless the caller
+  // supplies a stub, a stub Orca that always fails. A child can therefore
+  // never reach os.homedir()/.claude-coordinator nor the real `orca`.
+  const iso = mkdtempSync(join(tmpdir(), 'settle-iso-'));
+  isolationDirs.push(iso);
+  env.COORDINATOR_STATE_DIR = join(iso, 'state');
+  const failStub = join(iso, 'fail-stub.js');
+  writeFileSync(failStub, 'process.exit(1);\n', 'utf8');
+  env.SETTLE_ORCA_EXEC = process.execPath;
+  env.SETTLE_ORCA_PREFIX_ARGS_JSON = JSON.stringify([failStub]);
   if (extraEnv) {
     Object.assign(env, extraEnv);
   }
@@ -759,6 +778,101 @@ test('B3: polling waits for both signals — inbox arrives after worker-list', (
   strictEqual(out.verdict, 'SETTLED_BY_WORKER');
   strictEqual(out.evidence.workerDone.found, true);
   strictEqual(out.evidence.inboxVerified, true);
+});
+
+// ---------------------------------------------------------------------------
+// R1: the inbox walk matches run + taskId + dispatchId inside the queue walk,
+// so a foreign worker_done lying earlier cannot shadow ours.
+// ---------------------------------------------------------------------------
+
+const R1_RUN = 'run-r1';
+const R1_TASK = 'task_r1_ours';
+const R1_DISPATCH = 'ctx_r1_ours';
+
+function r1Msg(id, taskId, dispatchId) {
+  return { id, type: 'worker_done', to: 'run:' + R1_RUN, payload: { taskId, dispatchId } };
+}
+const R1_OURS = r1Msg('m_ours', R1_TASK, R1_DISPATCH);
+const R1_FOREIGN = r1Msg('m_foreign', 'task_r1_other', 'ctx_r1_other');
+
+function runR1(t, messages) {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-r1-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+  const workerList = { ok: true, result: { workers: [
+    { dispatchId: R1_DISPATCH, taskId: R1_TASK, state: 'succeeded' },
+    { dispatchId: 'ctx_r1_other', taskId: 'task_r1_other', state: 'succeeded' },
+  ] } };
+  const stubEnv = createOrcaStub(join(dir, 'bin'), workerList, { ok: true, result: { messages } });
+  const r = spawnSettle([
+    '--run', R1_RUN, '--task', R1_TASK, '--dispatch', R1_DISPATCH,
+    '--worktree', worktree, '--deadline-ms', '2000', '--poll-ms', '500',
+  ], stubEnv);
+  return { r, out: JSON.parse(r.stdout) };
+}
+
+function assertR1Settled({ r, out }) {
+  strictEqual(r.status, 0);
+  strictEqual(out.verdict, 'SETTLED_BY_WORKER');
+  strictEqual(out.evidence.inboxVerified, true);
+  strictEqual(out.evidence.workerDone.dispatchId, R1_DISPATCH);
+  strictEqual(out.evidence.workerDone.taskId, R1_TASK);
+}
+
+test('R1-1: [foreign, ours] → settled by our letter', (t) => {
+  assertR1Settled(runR1(t, [R1_FOREIGN, R1_OURS]));
+});
+
+test('R1-2: [ours, foreign] → settled by our letter', (t) => {
+  assertR1Settled(runR1(t, [R1_OURS, R1_FOREIGN]));
+});
+
+test('R1-3: only foreign → not settled, inboxVerified false', (t) => {
+  const { r, out } = runR1(t, [R1_FOREIGN]);
+  strictEqual(out.evidence.inboxVerified, false);
+  strictEqual(out.verdict === 'SETTLED_BY_WORKER', false);
+  strictEqual(r.status === 0, false);
+});
+
+// ---------------------------------------------------------------------------
+// R3: the inbox call is bounded by the remaining time to the deadline.
+// ---------------------------------------------------------------------------
+
+test('R3: hanging inbox call is cut off; one JSON object, non-zero exit, diagnostic', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-r3-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+  const stubPath = join(dir, 'hang-stub.js');
+  const wl = JSON.stringify({ ok: true, result: { workers: [{ dispatchId: R1_DISPATCH, taskId: R1_TASK, state: 'succeeded' }] } });
+  writeFileSync(stubPath, [
+    "const args = process.argv.slice(2);",
+    "if (args[1] === 'inbox') { setTimeout(() => {}, 60000); }",
+    "else { process.stdout.write(" + JSON.stringify(wl) + "); }",
+  ].join('\n'), 'utf8');
+
+  const started = Date.now();
+  const r = spawnSettle([
+    '--run', R1_RUN, '--task', R1_TASK, '--dispatch', R1_DISPATCH,
+    '--worktree', worktree, '--deadline-ms', '2000', '--poll-ms', '500',
+  ], { SETTLE_ORCA_EXEC: process.execPath, SETTLE_ORCA_PREFIX_ARGS_JSON: JSON.stringify([stubPath]) });
+  const elapsed = Date.now() - started;
+
+  strictEqual(r.status === 0, false);
+  strictEqual(r.status === null, false);
+  strictEqual(elapsed < 15000, true, 'elapsed ' + elapsed);
+  const out = JSON.parse(r.stdout);
+  strictEqual(out.evidence.inboxTimedOut, true);
+  strictEqual(out.reasons.includes('INBOX_CALL_TIMED_OUT'), true);
+  strictEqual(out.evidence.inboxVerified, false);
+  strictEqual(out.evidence.workerDone.found, false);
+  strictEqual(out.verdict === 'SETTLED_BY_WORKER', false);
+});
+
+test('R3: a normal inbox call reports inboxTimedOut false', (t) => {
+  const { out } = runR1(t, [R1_OURS]);
+  strictEqual(out.evidence.inboxTimedOut, false);
 });
 
 // ---------------------------------------------------------------------------

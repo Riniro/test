@@ -353,7 +353,7 @@ test('R3: disposeResources with stub → code 0, action recorded', async () => {
       if (subCmd === 'worker-list') {
         // Return a finished dispatch for ownership confirmation
         process.stdout.write(JSON.stringify({
-          result: { workers: [{ dispatchId: 'ctx-ora', taskId: 'task-ora', dispatchStatus: 'stopped' }] }
+          result: { workers: [{ dispatchId: 'ctx-ora', taskId: 'task-ora', state: 'stopped' }] }
         }) + '\\n');
       }
       // worker-stop or anything else: success
@@ -423,7 +423,7 @@ test('R3: disposeResources failing stub → code 5 (escalation)', async () => {
       if (subCmd === 'worker-list') {
         // Return a finished dispatch so ownership confirms
         process.stdout.write(JSON.stringify({
-          result: { workers: [{ dispatchId: 'ctx-fail', taskId: 'task-fail', dispatchStatus: 'stopped' }] }
+          result: { workers: [{ dispatchId: 'ctx-fail', taskId: 'task-fail', state: 'stopped' }] }
         }) + '\\n');
       } else {
         // worker-stop: fail
