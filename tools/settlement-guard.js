@@ -656,9 +656,8 @@ function _readDispatchState(dispatchId, runId, expectedTaskId) {
       return { ok: false, reason: 'dispatch is not in the worker list of run ' + runId };
     }
 
-    // `state` is what Orca reports; `dispatchStatus` is kept for the older
-    // shape settle.js records.
-    const state = rec.state || rec.dispatchStatus || null;
+    // `state` is the field the real `worker-list --json` reports.
+    const state = rec.state || null;
     if (!state) {
       return { ok: false, reason: 'worker-list record carries no state' };
     }

@@ -111,12 +111,9 @@ function runSettle(box, args) {
   });
 }
 
-function worker(dispatchId, taskId, state, workerState) {
-  return {
-    dispatchId, taskId, state,
-    workerState: workerState === undefined ? null : workerState,
-    dispatchStatus: state,
-  };
+// Shape of a real `worker-list --json` record: the dispatch state is `state`.
+function worker(dispatchId, taskId, state) {
+  return { dispatchId, taskId, state };
 }
 
 const DISPATCH = 'ctx_mandatory';
@@ -554,6 +551,21 @@ test('принадлежность: в списке запуска тот же d
   assert.equal(r.status, 5, r.stdout + r.stderr);
   assert.match(r.stdout, /not in the worker list/);
   assert.equal(box.stopCalls(), 0);
+});
+
+test('принадлежность: запись с dispatchStatus без state не подтверждает состояние dispatch', (t) => {
+  const box = sandbox(t, [worker(DISPATCH, TASK, 'succeeded')]);
+  runSettle(box, settleArgs(box));
+
+  // The record carries `dispatchStatus` and deliberately no `state`: `state`
+  // is the only field the real worker-list reports, so this is not a state.
+  box.setWorkers([{ dispatchId: DISPATCH, taskId: TASK, dispatchStatus: 'stopped' }]);
+  const r = runCli(box, ['dispose', '--dispatch', DISPATCH, '--run', RUN, '--task', TASK]);
+  assert.equal(r.status, 5, r.stdout + r.stderr);
+  assert.match(r.stdout, /dispatch ownership cannot be confirmed/);
+  assert.match(r.stdout, /carries no state/);
+  assert.equal(box.stopCalls(), 0);
+  assert.notEqual(box.journal()[DISPATCH].completedAction?.status, 'completed');
 });
 
 test('принадлежность: запрос списка идёт по своему запуску', (t) => {
