@@ -85,11 +85,15 @@ function spawnSettle(argv, extraEnv) {
   if (extraEnv) {
     Object.assign(env, extraEnv);
   }
-  return spawnSync(process.execPath, [SETTLE, ...argv], {
+  const result = spawnSync(process.execPath, [SETTLE, ...argv], {
     env,
     timeout: 30000,
     encoding: 'utf8',
   });
+  // Report the directory this helper allocated, so a test can check that the
+  // child wrote there and nowhere else.
+  result.isolation = { stateDir: join(iso, 'state') };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +837,61 @@ test('R1-3: only foreign → not settled, inboxVerified false', (t) => {
   strictEqual(out.evidence.inboxVerified, false);
   strictEqual(out.verdict === 'SETTLED_BY_WORKER', false);
   strictEqual(r.status === 0, false);
+});
+
+// Our taskId with somebody else's dispatchId: the task alone is not identity.
+const R4_FOREIGN_DISPATCH = r1Msg('m_same_task_foreign_dispatch', R1_TASK, 'ctx_r1_foreign_dispatch');
+
+test('R4-1: [our taskId + foreign dispatchId, ours] → settled by our letter', (t) => {
+  const res = runR1(t, [R4_FOREIGN_DISPATCH, R1_OURS]);
+  assertR1Settled(res);
+  strictEqual(res.out.evidence.workerDone.dispatchId === 'ctx_r1_foreign_dispatch', false);
+});
+
+test('R4-2: only our taskId + foreign dispatchId → not settled, inboxVerified false', (t) => {
+  const { r, out } = runR1(t, [R4_FOREIGN_DISPATCH]);
+  strictEqual(out.evidence.inboxVerified, false);
+  strictEqual(out.verdict === 'SETTLED_BY_WORKER', false);
+  strictEqual(r.status === 0, false);
+});
+
+// ---------------------------------------------------------------------------
+// ISO: the child writes only into the directory spawnSettle allocated.
+// ---------------------------------------------------------------------------
+
+test('ISO: record lands in the allocated state dir, default dir is not created in HOME', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settle-iso-check-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home');
+  mkdirSync(home, { recursive: true });
+  const worktree = join(dir, 'worktree');
+  createGitRepo(worktree);
+  const workerList = { ok: true, result: { workers: [
+    { dispatchId: R1_DISPATCH, taskId: R1_TASK, state: 'succeeded' },
+  ] } };
+  const stubEnv = createOrcaStub(join(dir, 'bin'), workerList, { ok: true, result: { messages: [R1_OURS] } });
+  const r = spawnSettle([
+    '--run', R1_RUN, '--task', R1_TASK, '--dispatch', R1_DISPATCH,
+    '--worktree', worktree, '--deadline-ms', '2000', '--poll-ms', '500',
+  ], { ...stubEnv, HOME: home, USERPROFILE: home });
+  strictEqual(r.status, 0, r.stdout + r.stderr);
+
+  // 1. the record is in the state dir spawnSettle allocated, keyed by dispatchId
+  const stateDir = r.isolation.stateDir;
+  const journalFile = join(stateDir, 'default', 'settlements.json');
+  // Both checks run before either is reported, so a leak shows both symptoms.
+  const problems = [];
+  let keyed = false;
+  if (existsSync(journalFile)) {
+    keyed = Object.prototype.hasOwnProperty.call(JSON.parse(readFileSync(journalFile, 'utf8')), R1_DISPATCH);
+  }
+  if (!keyed) problems.push('no entry for our dispatchId in allocated state dir ' + stateDir);
+
+  // 2. nothing was created at the default location inside the substituted HOME
+  if (existsSync(join(home, '.claude-coordinator'))) {
+    problems.push('.claude-coordinator was created in the substituted HOME ' + home);
+  }
+  strictEqual(problems.length, 0, problems.join('; '));
 });
 
 // ---------------------------------------------------------------------------
