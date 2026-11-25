@@ -1886,25 +1886,8 @@ describe('KAN-14 real-gh regression tests', () => {
 
   // Regression 3: mergeCommit as object {oid} → check-runs called with the SHA string from oid
   test('R3: mergeCommit as object {oid} → check-runs called with oid value', async () => {
-    const shaCaptured = [];
-    const objMergeStub = [
-      'const a=process.argv.slice(2).join(" ");',
-      'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}}])+ "\\n");',
-      '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}})+ "\\n");',
-      '} else if (a.includes("check-runs")) {',
-      '  shaCaptured.push(a);',
-      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
-      '} else {',
-      '  process.stdout.write("[]"+ "\\n");',
-      '}',
-      'process.exit(0);',
-    ].join('\n');
-
     const dir = mkTempDir('pick-kan14r3');
     const stubPath = path.join(dir, 'gh.js');
-    fs.writeFileSync(stubPath, objMergeStub);
     // Capture shaCaptured by writing to a temp file (spawn doesn't inherit vars)
     const capturePath = path.join(dir, 'sha-capture.json');
     const stubWithCapture = [
@@ -1958,25 +1941,49 @@ describe('KAN-14 real-gh regression tests', () => {
   });
 
   // Regression 4: mergeCommit without oid → treated as no merge commit
-  test('R4: mergeCommit as empty object {} → no match → reason none', async () => {
-    const noOidStub = [
+  test('R4: mergeCommit as empty object {} → no check-runs call → reason none', async () => {
+    const dir = mkTempDir('pick-kan14r4');
+    const stubPath = path.join(dir, 'gh.js');
+    const logPath = path.join(dir, 'check-runs.log');
+    // Ensure the log file exists so fs.existsSync works even if nothing writes to it
+    fs.writeFileSync(logPath, '');
+    fs.writeFileSync(stubPath, [
+      'const fs=require("fs");',
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
       '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{}})+ "\\n");',
+      '} else if (a.includes("check-runs")) {',
+      '  fs.appendFileSync(' + JSON.stringify(logPath) + ', "called\\n");',
+      '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
       'process.exit(0);',
-    ].join('\n');
+    ].join('\n'));
 
-    const r = await runKan14({
-      ghStub: noOidStub,
-      jiraHandler: JIRA_HANDLER,
-    });
-    // No oid → no mergeSha → prInfo is null → no match for this issue
-    assert.strictEqual(r.out.work, false);
-    assert.strictEqual(r.out.reason, 'none');
+    const jiraDir = mkTempDir('pick-kan14r4j');
+    const sd = mkTempDir('pick-kan14r4s');
+    const { server: srv, close } = await startServer(JIRA_HANDLER);
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stubPath,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      assert.strictEqual(r.status, 3); // reason none → exit 3
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.work, false);
+      assert.strictEqual(out.reason, 'none');
+      // No oid → no mergeSha → check-runs must NOT have been called
+      assert.strictEqual(fs.existsSync(logPath) && fs.readFileSync(logPath, 'utf8').trim().length, 0, 'check-runs must not be called when mergeCommit has no oid');
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
   });
 });
