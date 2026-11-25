@@ -266,7 +266,7 @@ export async function evaluateAwaitingMergeIssue(issue, opts) {
   const matches = [];
   for (const c of results) {
     if (!keyInTitle(issue.key, c.title)) continue;
-    const headRepo = c.headRepository ? (c.headRepository.full_name || c.headRepository.name || '') : '';
+    const headRepo = c.headRepository ? (c.headRepository.nameWithOwner || '') : '';
     if (headRepo !== repo) continue;
     if (c.baseRefName !== baseBranch) continue;
     matches.push(c);
@@ -330,11 +330,31 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
     };
   }
 
+  // mergeCommit from `gh` is either a string SHA or an object { oid: "…" };
+  // anything else (including an empty object) means "no merge commit yet".
+  let mergeSha;
+  if (prData.mergeCommit && typeof prData.mergeCommit === 'object') {
+    mergeSha = typeof prData.mergeCommit.oid === 'string' ? prData.mergeCommit.oid : null;
+  } else {
+    mergeSha = typeof prData.mergeCommit === 'string' ? prData.mergeCommit : null;
+  }
+  if (!mergeSha) {
+    return {
+      matched: true,
+      reason: null,
+      prInfo: null,
+      counts: { awaitingMerge: 0, ready: 0 },
+      prUnclear: false,
+      err: null,
+      ciStatus: null,
+    };
+  }
+
   // check-runs of the merge commit is a mandatory source: a failed or unreadable answer is
   // "unavailable" and must never turn into an empty list (that would read as "pending").
   let runs;
   try {
-    runs = await fetchCheckRunsForSha(prData.mergeCommit, repo, opts.env);
+    runs = await fetchCheckRunsForSha(mergeSha, repo, opts.env);
   } catch {
     return { matched: false, reason: 'unavailable', prInfo: null, counts: { awaitingMerge: 0, ready: 0 }, prUnclear: false, err: 'gh_unavailable' };
   }
@@ -351,7 +371,7 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
   const status = determinePrStatus({
     prState: 'MERGED',
     mergedAt: prData.mergedAt,
-    mergeCommit: prData.mergeCommit,
+    mergeCommit: mergeSha,
     ciStatus,
     graceMinutes: ciGraceMinutes,
   });
@@ -359,7 +379,7 @@ async function evaluatePrData(issue, prData, repo, baseBranch, ciGraceMinutes, o
   return {
     matched: true,
     reason: status.reason,
-    prInfo: { number: prData.number, state: prData.state, url: prData.url, mergeCommit: prData.mergeCommit },
+    prInfo: { number: prData.number, state: prData.state, url: prData.url, mergeCommit: mergeSha },
     counts: status.counts,
     prUnclear: false,
     err: null,

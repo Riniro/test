@@ -261,9 +261,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":null,"mergeCommit":null}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":null,"mergeCommit":null}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":null,"mergeCommit":null})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":null,"mergeCommit":null})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else {',
@@ -305,9 +305,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":null,"mergeCommit":null}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":null,"mergeCommit":null}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":null,"mergeCommit":null})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"OPEN","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":null,"mergeCommit":null})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else {',
@@ -352,9 +352,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
       '} else {',
@@ -546,9 +546,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"'+ new Date(Date.now() - 5 * 60000).toISOString() +'","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"'+ new Date(Date.now() - 5 * 60000).toISOString() +'","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"'+ new Date(Date.now() - 5 * 60000).toISOString() +'","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"'+ new Date(Date.now() - 5 * 60000).toISOString() +'","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"status":"in_progress"}])+ "\\n");',
       '} else {',
@@ -604,9 +604,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
       '} else {',
@@ -656,9 +656,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2020-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2020-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2020-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2020-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"status":"in_progress"}])+ "\\n");',
       '} else {',
@@ -714,9 +714,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"},{"number":43,"state":"MERGED","title":"[KAN-14] Another PR","url":"https://gh.test/Riniro/test/pull/43","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"def456"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}},{"number":43,"state":"MERGED","title":"[KAN-14] Another PR","url":"https://gh.test/Riniro/test/pull/43","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"def456"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else {',
@@ -774,7 +774,7 @@ describe('CLI process tests', () => {
       'if (a.includes("pr list")) {',
       '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else {',
@@ -834,9 +834,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
       '} else {',
@@ -926,9 +926,9 @@ describe('CLI process tests', () => {
       fs.writeFileSync(stubPath1, [
         'const a=process.argv.slice(2).join(" ");',
         'if (a.includes("pr list")) {',
-        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
         '} else if (a.includes("pr view")) {',
-        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
         '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
@@ -972,9 +972,9 @@ describe('CLI process tests', () => {
       fs.writeFileSync(stubPath2, [
         'const a=process.argv.slice(2).join(" ");',
         'if (a.includes("pr list")) {',
-        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
         '} else if (a.includes("pr view")) {',
-        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
         '  process.stdout.write(JSON.stringify([{"id":"ci-2","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
@@ -1046,9 +1046,9 @@ describe('CLI process tests', () => {
       fs.writeFileSync(stubPath, [
         'const a=process.argv.slice(2).join(" ");',
         'if (a.includes("pr list")) {',
-        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+        '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
         '} else if (a.includes("pr view")) {',
-        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
         '  process.stdout.write(JSON.stringify([{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}])+ "\\n");',
         '} else {',
@@ -1112,9 +1112,9 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"}])+ "\\n");',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
       '} else if (a.includes("pr view")) {',
-      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"full_name":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":"abc123"})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
       '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
       '} else {',
@@ -1252,8 +1252,8 @@ describe('CLI process tests', () => {
 describe('queue priority matrix', () => {
   const MERGED = (key, n) => ({
     number: n, state: 'MERGED', title: '[' + key + '] work', url: 'https://gh.test/Riniro/test/pull/' + n,
-    baseRefName: 'master', headRepository: { full_name: 'Riniro/test' },
-    mergedAt: '2024-01-01T00:00:00Z', mergeCommit: 'm' + n,
+    baseRefName: 'master', headRepository: { nameWithOwner: 'Riniro/test' },
+    mergedAt: '2024-01-01T00:00:00Z', mergeCommit: { oid: 'm' + n },
   });
   const OPEN = (key, n) => ({ ...MERGED(key, n), state: 'OPEN', mergedAt: null, mergeCommit: null });
   const issue = (key, ...labels) => ({ key, fields: { summary: key + ' summary', labels: ['project-test', ...labels] } });
@@ -1428,8 +1428,8 @@ describe('pickup round 3', () => {
   const GREEN = [UBUNTU, WINDOWS];
   const MERGED = (key, n) => ({
     number: n, state: 'MERGED', title: '[' + key + '] work', url: 'https://gh.test/Riniro/test/pull/' + n,
-    baseRefName: 'master', headRepository: { full_name: 'Riniro/test' },
-    mergedAt: new Date(Date.now() - 5 * 60000).toISOString(), mergeCommit: 'm' + n,
+    baseRefName: 'master', headRepository: { nameWithOwner: 'Riniro/test' },
+    mergedAt: new Date(Date.now() - 5 * 60000).toISOString(), mergeCommit: { oid: 'm' + n },
   });
   const OPEN = (key, n) => ({ ...MERGED(key, n), state: 'OPEN', mergedAt: null, mergeCommit: null });
   const issue = (key, ...labels) => ({ key, fields: { summary: key + ' summary', labels: ['project-test', ...labels] } });
@@ -1777,5 +1777,206 @@ describe('search failure of any code is unavailable (R1)', () => {
     const out = JSON.parse(r.stdout);
     assert.strictEqual(out.work, true);
     assert.strictEqual(out.issue.key, 'KAN-7');
+  });
+});
+
+// ==========================================================================
+// KAN-14 regressions — real gh shapes must not bypass the filter
+// ==========================================================================
+
+describe('KAN-14 real-gh regression tests', () => {
+  /**
+   * Minimal run: one awaiting-merge issue, one merged PR in real-gh form,
+   * check-runs stubbed.  All we need is the pickup path from the issue
+   * through pr-list → pr-view → check-runs.
+   */
+  async function runKan14({ ghStub, jiraHandler }) {
+    const dir = mkTempDir('pick-kan14');
+    const stubPath = path.join(dir, 'gh.js');
+    fs.writeFileSync(stubPath, ghStub);
+    const jiraDir = mkTempDir('pick-kan14j');
+    const sd = mkTempDir('pick-kan14s');
+    const { server: srv, close } = await startServer(jiraHandler);
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stubPath,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      let out = null;
+      try { out = JSON.parse(r.stdout); } catch { /* not json */ }
+      return { status: r.status, out };
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  }
+
+  /** Shared stub for merged PR: pr-list + pr-view return real-gh form. */
+  const MERGED_STUB = [
+    'const a=process.argv.slice(2).join(" ");',
+    'if (a.includes("pr list")) {',
+    '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}}])+ "\\n");',
+    '} else if (a.includes("pr view")) {',
+    '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}})+ "\\n");',
+    '} else if (a.includes("check-runs")) {',
+    '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
+    '} else {',
+    '  process.stdout.write("[]"+ "\\n");',
+    '}',
+    'process.exit(0);',
+  ].join('\n');
+
+  const JIRA_HANDLER = (req, res) => {
+    if (req.url && req.url.includes('ai-in-review')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ issues: [] }));
+      return;
+    }
+    if (req.url && req.url.includes('ai-ready')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ issues: [] }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      issues: [{ key: 'KAN-16', fields: { summary: 'add a zero-duration formatDuration example', labels: ['project-test', 'ai-awaiting-merge'] } }],
+    }));
+  };
+
+  // Regression 1: own-repo merged PR in real-gh form → reason "closing"
+  test('R1: own-repo merged PR (real-gh form) → reason "closing"', async () => {
+    const r = await runKan14({
+      ghStub: MERGED_STUB,
+      jiraHandler: JIRA_HANDLER,
+    });
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.out.work, true);
+    assert.strictEqual(r.out.reason, 'closing');
+    assert.strictEqual(r.out.issue.key, 'KAN-16');
+  });
+
+  // Regression 2: forked PR (different nameWithOwner) is rejected → no match for issue
+  test('R2: forked PR (different nameWithOwner) is skipped → reason none', async () => {
+    const forkedStub = [
+      'const a=process.argv.slice(2).join(" ");',
+      'if (a.includes("pr list")) {',
+      '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"fork-owner/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}}])+ "\\n");',
+      '} else if (a.includes("pr view")) {',
+      '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"fork-owner/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}})+ "\\n");',
+      '} else if (a.includes("check-runs")) {',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
+      '} else {',
+      '  process.stdout.write("[]"+ "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join('\n');
+
+    const r = await runKan14({
+      ghStub: forkedStub,
+      jiraHandler: JIRA_HANDLER,
+    });
+    // Forked PR is rejected → no match → no work
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'none');
+  });
+
+  // Regression 3: mergeCommit as object {oid} → check-runs called with the SHA string from oid
+  test('R3: mergeCommit as object {oid} → check-runs called with oid value', async () => {
+    const shaCaptured = [];
+    const objMergeStub = [
+      'const a=process.argv.slice(2).join(" ");',
+      'if (a.includes("pr list")) {',
+      '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}}])+ "\\n");',
+      '} else if (a.includes("pr view")) {',
+      '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}})+ "\\n");',
+      '} else if (a.includes("check-runs")) {',
+      '  shaCaptured.push(a);',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
+      '} else {',
+      '  process.stdout.write("[]"+ "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join('\n');
+
+    const dir = mkTempDir('pick-kan14r3');
+    const stubPath = path.join(dir, 'gh.js');
+    fs.writeFileSync(stubPath, objMergeStub);
+    // Capture shaCaptured by writing to a temp file (spawn doesn't inherit vars)
+    const capturePath = path.join(dir, 'sha-capture.json');
+    const stubWithCapture = [
+      'const fs=require("fs");',
+      'let shaCaptured=[];',
+      'const a=process.argv.slice(2).join(" ");',
+      'if (a.includes("pr list")) {',
+      '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}}])+ "\\n");',
+      '} else if (a.includes("pr view")) {',
+      '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{"oid":"ec6918dbbc300e9de4676823f6d17e99e778fe23"}})+ "\\n");',
+      '} else if (a.includes("check-runs")) {',
+      '  shaCaptured.push(a);',
+      '  fs.writeFileSync(' + JSON.stringify(capturePath) + ', JSON.stringify(shaCaptured));',
+      '  process.stdout.write(JSON.stringify([{"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success"},{"name":"Tests (windows-latest)","status":"completed","conclusion":"success"}])+ "\\n");',
+      '} else {',
+      '  process.stdout.write("[]"+ "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join('\n');
+    fs.writeFileSync(stubPath, stubWithCapture);
+
+    const jiraDir = mkTempDir('pick-kan14r3j');
+    const sd = mkTempDir('pick-kan14r3s');
+    const { server: srv, close } = await startServer(JIRA_HANDLER);
+    const env = {
+      ...process.env,
+      JIRA_CREDENTIALS_FILE: writeCredsFile(jiraDir, 'http://127.0.0.1:' + srv.address().port),
+      COORDINATOR_STATE_DIR: sd,
+      PICKUP_GH_EXEC: stubPath,
+      PICKUP_GH_PREFIX_ARGS_JSON: JSON.stringify([process.execPath]),
+    };
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--repo', 'Riniro/test'], env, 15000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.work, true);
+      assert.strictEqual(out.reason, 'closing');
+
+      // Verify that check-runs was called with an argument containing the SHA
+      const captured = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
+      assert.ok(captured.length >= 1, 'check-runs should have been called at least once');
+      const arg = captured[0];
+      // The SHA from oid should be in the arguments (as part of the check-runs request)
+      assert.ok(arg.includes('ec6918dbbc300e9de4676823f6d17e99e778fe23'), 'SHA from mergeCommit.oid should appear in check-runs args: ' + arg);
+      // The raw object {"oid":"..."} should NOT appear as a string arg
+      assert.ok(!arg.includes('{"oid"'), 'raw object should not appear as string arg');
+    } finally {
+      await close();
+      cleanup(jiraDir); cleanup(sd); cleanup(dir);
+    }
+  });
+
+  // Regression 4: mergeCommit without oid → treated as no merge commit
+  test('R4: mergeCommit as empty object {} → no match → reason none', async () => {
+    const noOidStub = [
+      'const a=process.argv.slice(2).join(" ");',
+      'if (a.includes("pr list")) {',
+      '  process.stdout.write(JSON.stringify([{"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{}}])+ "\\n");',
+      '} else if (a.includes("pr view")) {',
+      '  process.stdout.write(JSON.stringify({"number":15,"state":"MERGED","title":"[KAN-16] add a zero-duration formatDuration example","url":"https://gh.test/Riniro/test/pull/15","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2026-11-25T01:09:30Z","mergeCommit":{}})+ "\\n");',
+      '} else {',
+      '  process.stdout.write("[]"+ "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join('\n');
+
+    const r = await runKan14({
+      ghStub: noOidStub,
+      jiraHandler: JIRA_HANDLER,
+    });
+    // No oid → no mergeSha → prInfo is null → no match for this issue
+    assert.strictEqual(r.out.work, false);
+    assert.strictEqual(r.out.reason, 'none');
   });
 });
