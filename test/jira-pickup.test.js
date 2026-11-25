@@ -838,7 +838,7 @@ describe('CLI process tests', () => {
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',
-      '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
+      '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":1001,"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
       '} else {',
       '  process.stdout.write("[]"+ "\\n");',
       '}',
@@ -856,7 +856,7 @@ describe('CLI process tests', () => {
     };
     const markResult = await runSpawn(CLI, [
       'mark-handled', '--repo', 'Riniro/test', '--issue', 'KAN-14',
-      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', 'ci-1',
+      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', '1001',
     ], envMark, 10000);
     assert.strictEqual(markResult.status, 0);
     const markOut = JSON.parse(markResult.stdout);
@@ -903,15 +903,15 @@ describe('CLI process tests', () => {
   // ------------------------------------------------------------------------
   // Regression 1 — handled failure for one CI run must not suppress a different run
   // ------------------------------------------------------------------------
-  test('handled failure ci-1 must not suppress different run ci-2', async () => {
+  test('handled failure 1001 must not suppress different run 1002', async () => {
     const tmpDir = mkTempDir('pick-r1');
 
-    // Phase 1: mark ci-1 as handled
+    // Phase 1: mark 1001 as handled
     const stateDir = mkTempDir('pick-r1s');
     const envMark = { ...process.env, COORDINATOR_STATE_DIR: stateDir };
     const markResult = await runSpawn(CLI, [
       'mark-handled', '--repo', 'Riniro/test', '--issue', 'KAN-14',
-      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', 'ci-1',
+      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', '1001',
     ], envMark, 10000);
     assert.strictEqual(markResult.status, 0);
     const markOut = JSON.parse(markResult.stdout);
@@ -921,7 +921,7 @@ describe('CLI process tests', () => {
     let jiraDir2 = null;
 
     try {
-      // Phase 2a: same run ci-1 fails → should be suppressed (existing behaviour)
+      // Phase 2a: same run 1001 fails → should be suppressed (existing behaviour)
       const stubPath1 = path.join(tmpDir, 'gh1.js');
       fs.writeFileSync(stubPath1, [
         'const a=process.argv.slice(2).join(" ");',
@@ -930,7 +930,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":1001,"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',
@@ -967,7 +967,7 @@ describe('CLI process tests', () => {
       assert.strictEqual(out1.reason, 'closing_ci_failed_handled');
       assert.strictEqual(out1.work, false);
 
-      // Phase 2b: different run ci-2 fails → should NOT be suppressed
+      // Phase 2b: different run 1002 fails → should NOT be suppressed
       const stubPath2 = path.join(tmpDir, 'gh2.js');
       fs.writeFileSync(stubPath2, [
         'const a=process.argv.slice(2).join(" ");',
@@ -976,7 +976,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":"ci-2","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":1002,"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',
@@ -1027,12 +1027,12 @@ describe('CLI process tests', () => {
   test('handled failure must not block ready pickup', async () => {
     const tmpDir = mkTempDir('pick-r2');
 
-    // Phase 1: mark ci-1 as handled
+    // Phase 1: mark 1001 as handled
     const stateDir = mkTempDir('pick-r2s');
     const envMark = { ...process.env, COORDINATOR_STATE_DIR: stateDir };
     const markResult = await runSpawn(CLI, [
       'mark-handled', '--repo', 'Riniro/test', '--issue', 'KAN-14',
-      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', 'ci-1',
+      '--pr', '42', '--merge-sha', 'abc123', '--ci-run', '1001',
     ], envMark, 10000);
     assert.strictEqual(markResult.status, 0);
     const markOut = JSON.parse(markResult.stdout);
@@ -1041,7 +1041,7 @@ describe('CLI process tests', () => {
     let jiraDir = null;
 
     try {
-      // GH stub: merged PR with failed check run ci-1 (already handled)
+      // GH stub: merged PR with failed check run 1001 (already handled)
       const stubPath = path.join(tmpDir, 'gh.js');
       fs.writeFileSync(stubPath, [
         'const a=process.argv.slice(2).join(" ");',
@@ -1050,7 +1050,7 @@ describe('CLI process tests', () => {
         '} else if (a.includes("pr view")) {',
         '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
         '} else if (a.includes("check-runs")) {',
-        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":"ci-1","name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
+        '  process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{"id":1001,"name":"Tests (windows-latest)","status":"completed","conclusion":"failure"}]})+ "\\n");',
         '} else {',
         '  process.stdout.write("[]"+ "\\n");',
         '}',

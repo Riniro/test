@@ -1797,17 +1797,6 @@ describe('claim.js CLI', () => {
 // ==========================================================================
 
 describe('claim.js — mandatory check-runs gate', () => {
-  // Fixture: a real `gh api .../check-runs` response shape — object with `total_count` (number)
-  // and `check_runs` (array). Numeric `id`, fields from the live GitHub response.
-  // This is the form that `fetchCheckRunsForSha` must parse; bare arrays are a legacy fallback.
-  const FIXTURE = {
-    total_count: 2,
-    check_runs: [
-      { id: 138915098915, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-      { id: 138915098857, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
-    ],
-  };
-
   // Helper: build an inline gh stub that writes check-runs from env var.
   // The existing passing adoptExisting tests use simple inline stubs that bypass routing:
   // they always write the expected JSON and exit. This helper does the same.
@@ -1819,7 +1808,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
       '  var raw = process.env.CHECK_RUNS || "{}";',
-      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: (d && d.check_runs) || [], check_runs: d && d.check_runs || [] }) + "\\n"); } catch { process.stdout.write("[]" + "\\n"); }',
+      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); } catch { process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); }',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("view") !== -1) {',
@@ -1845,7 +1834,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
       '  var raw = process.env.' + envVarName + ' || "{}";',
-      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: (d && d.check_runs) || [], check_runs: d && d.check_runs || [] }) + "\\n"); } catch { process.stdout.write("[]" + "\\n"); }',
+      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); } catch { process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); }',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("view") !== -1) {',
@@ -2795,12 +2784,12 @@ describe('claim.js — fix round 2', () => {
     assert.ok(apiCalls[1].some((x) => x.includes('repos/Riniro/test')), 'page 2 has repo in path');
   });
 
-  test('m7.4: page-2 timeout (page-1 returns data, page-2 returns empty) → code 6', async () => {
+  test('m7.4: gh exit 1 on page 2 → code 6', async () => {
     const res = await scenario({
       prs: [OPEN_PR], comments: [accept()], failPage: 2,
       pages: [
         { total_count: 2, check_runs: [UBUNTU] },
-        { total_count: 2, check_runs: [] },
+        { total_count: 2, check_runs: [WINDOWS] },
       ],
     }, adopt);
     assert.strictEqual(res.status, 6);
@@ -2959,10 +2948,9 @@ describe('claim.js — fix round 2', () => {
     assert.strictEqual(res.state.status, 'To Do');
   });
 
-  // ---- MUTATION DEMO — broken product code actually fails these tests ---------------------------
+  // ---- Edge cases: missing check_runs field and bare-array fallback ----------------------------
 
-  test('MUT1: break object-form parsing (remove the check_runs field from the response) → code 6, not code 4', async () => {
-    // Simulate: the product code accidentally discards the `check_runs` key before validation.
+  test('missing check_runs field → source_unavailable (code 6)', async () => {
     const res = await scenario({
       prs: [OPEN_PR], comments: [accept()],
       pages: [
@@ -3002,16 +2990,6 @@ describe('claim.js — fix round 2', () => {
     assert.ok(res.gh.filter((a) => a[0] === 'api').length > 1, 'pagination was attempted');
   });
 
-  test('pagination: bare array → product accepts as-is, test passes', async () => {
-    const res = await scenario({
-      prs: [OPEN_PR], comments: [accept()],
-      raw: JSON.stringify([UBUNTU, WINDOWS]),
-    }, adopt);
-    assert.strictEqual(res.status, 4);
-    assert.strictEqual(res.out.state, 'awaiting_merge');
-    assert.strictEqual(res.out.readiness.ci, true);
-  });
-
   test('R9: --expect-status ignores case and surrounding spaces → code 0', async () => {
     for (const expected of ['in review', '  IN REVIEW  ', ' In Review']) {
       const res = await scenario({ prs: [] }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', expected]);
@@ -3035,25 +3013,9 @@ describe('claim.js — fix round 2', () => {
     });
   }
 
-  // ---- MUTATION DEMO — broken product code actually fails these tests ---------------------------
+  // ---- Edge cases: missing check_runs field and bare-array fallback ----------------------------
 
-  test('MUT1: break object-form parsing (remove the check_runs field from the response) → code 6, not code 4', async () => {
-    const res = await scenario({
-      prs: [OPEN_PR], comments: [accept()],
-      pages: [
-        { total_count: 2 }, // check_runs is missing
-      ],
-    }, adopt);
-    assert.strictEqual(res.status, 6);
-    assert.strictEqual(res.out.reason, 'source_unavailable');
-    assert.strictEqual(res.out.state, 'source_unavailable');
-    assert.deepStrictEqual(writes(res), []);
-    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
-  });
-
-  test('MUT3: pass through a bare array instead of object form → product falls back to flat list, test passes (not broken)', async () => {
-    // The product has a legacy fallback: `if (Array.isArray(data)) return data`.
-    // A bare array is accepted, so this test verifies that branch is still covered.
+  test('bare array fallback: product accepts flat list → success', async () => {
     const res = await scenario({
       prs: [OPEN_PR], comments: [accept()],
       raw: JSON.stringify([UBUNTU, WINDOWS]),
