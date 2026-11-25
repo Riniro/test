@@ -1457,6 +1457,9 @@ describe('pickup round 3', () => {
     '  const api = cfg.api || {};',
     '  if (api.fail) process.exit(1);',
     '  if (api.raw !== undefined) out(api.raw);',
+    '  var page = 1;',
+    '  a.forEach(function (x) { var m = /^page=(\\d+)$/.exec(x); if (m) page = Number(m[1]); });',
+    '  if (api.pages && api.pages[page - 1] !== undefined) out(api.pages[page - 1]);',
     '  out({ total_count: (api.runs || []).length, check_runs: api.runs || [] });',
     '}',
     'process.exit(1);',
@@ -1663,6 +1666,39 @@ describe('pickup round 3', () => {
     assert.strictEqual(parseCheckRuns([ok('x')], req), 'pending');
     assert.strictEqual(parseCheckRuns([], req), 'pending');
     assert.strictEqual(parseCheckRuns(null, req), 'pending');
+  });
+
+  // ---- R6.1 — incomplete check-runs pagination must NOT allow closing ----------------------------------
+
+  test('R6.1: incomplete answer (2 of 5, page 2 empty) → unavailable, not closing', async () => {
+    const res = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      list: { 'KAN-1': [MERGED('KAN-1', 11)] },
+      api: {
+        pages: [
+          { total_count: 5, check_runs: [UBUNTU, WINDOWS] },
+          { total_count: 5, check_runs: [] },
+        ],
+      },
+    });
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.reason, 'unavailable');
+    assert.strictEqual(res.out.work, false);
+  });
+
+  test('R6.1: full green answer still allows closing', async () => {
+    const res = await run({
+      awaiting: [issue('KAN-1', 'ai-awaiting-merge')],
+      list: { 'KAN-1': [MERGED('KAN-1', 11)] },
+      api: {
+        pages: [
+          { total_count: 2, check_runs: [UBUNTU, WINDOWS] },
+        ],
+      },
+    });
+    assert.strictEqual(res.status, 0);
+    assert.strictEqual(res.out.work, true);
+    assert.strictEqual(res.out.reason, 'closing');
   });
 
   // ---- R7 — --repo binds every gh call -----------------------------------------------------------

@@ -109,8 +109,14 @@ export async function fetchCheckRunsForSha(sha, repo, env) {
     if (Array.isArray(data)) return data; // already a flat list, nothing to page through
     if (!data || !Array.isArray(data.check_runs)) throw ciUnavailable('unexpected response');
     all.push(...data.check_runs);
-    if (typeof data.total_count !== 'number' || all.length >= data.total_count || data.check_runs.length === 0) {
+    if (typeof data.total_count !== 'number') {
       return all;
+    }
+    if (all.length >= data.total_count) {
+      return all;
+    }
+    if (data.check_runs.length === 0) {
+      throw ciUnavailable('empty page before reading all ' + data.total_count + ' checks');
     }
   }
   throw ciUnavailable('too many pages');
