@@ -2412,6 +2412,142 @@ describe('claim.js — mandatory check-runs gate', () => {
     }
   });
 
+  // ==========================================================================
+  // KAN-18 — empty CLAIM_REQUIRED_CHECKS must NOT disable the CI gate
+  // ==========================================================================
+
+  describe('KAN-18: empty CLAIM_REQUIRED_CHECKS', () => {
+    const EMPTY_VALUES = ['', '   ', ',', ' , , '];
+    const GATE_ACCOUNT = 'gate123';
+    const HEAD_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
+
+    // Each empty value: the test should produce review_pending (NOT awaiting_merge).
+    // If the empty value is wrongly treated as "no checks required", it would yield awaiting_merge.
+    for (const val of EMPTY_VALUES) {
+    test('empty CLAIM_REQUIRED_CHECKS ("' + val.replace(/"/g, '\\"') + '") → review_pending, not awaiting_merge', async () => {
+      const gh = mkTempDir('kan18-empty-claim-' + EMPTY_VALUES.indexOf(val));
+      const logPath = path.join(gh, 'gh-argv.jsonl');
+      fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
+      let mutationCalled = { value: false };
+      const { server: srv, close: cs } = await startServer(async (req, res) => {
+        if (req.method === 'GET') {
+          if (req.url.endsWith('/myself')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accountId: GATE_ACCOUNT }));
+            return;
+          }
+          if (req.url.endsWith('/comment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              comments: [{
+                id: '1',
+                body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+                author: { accountId: GATE_ACCOUNT },
+              }],
+            }));
+            return;
+          }
+          if (!mutationCalled.value) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+            }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        } else if (req.method === 'PUT') {
+          await drainBody(req);
+          mutationCalled.value = true;
+          res.writeHead(204);
+          res.end();
+        } else {
+          await drainBody(req);
+          res.writeHead(200);
+          res.end();
+        }
+      });
+      const port = srv.address().port;
+      const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+      try {
+        const bothPassing = JSON.stringify({
+          total_count: 2,
+          check_runs: [
+            { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+            { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+          ],
+        });
+        const envWithPr = {
+          ...env,
+          CHECK_RUNS: bothPassing,
+          CLAIM_REQUIRED_CHECKS: val,
+          CLAIM_PR_LIST: JSON.stringify([
+            { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+          ]),
+        };
+        const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+        assert.strictEqual(r.status, 0);
+        const out = JSON.parse(r.stdout);
+        assert.notStrictEqual(out.state, 'awaiting_merge', 'empty CLAIM_REQUIRED_CHECKS must NOT result in awaiting_merge');
+        assert.strictEqual(out.state, 'review_pending');
+      } finally {
+        await cs();
+        cleanup(gh);
+      }
+    });
+  }
+
+  // Control: empty string with NO PR and NO verdict → normal claim (ai-ready removed),
+  // confirming the variable actually reaches the product and does not affect the no-PR path.
+  test('control: empty CLAIM_REQUIRED_CHECKS + no PR → normal claimed (ai-ready removed)', async () => {
+    const gh = mkTempDir('kan18-ctrl-claim');
+    const logPath = path.join(gh, 'gh-argv.jsonl');
+    fs.writeFileSync(path.join(gh, 'gh.js'), [
+      'var fs = require("fs");',
+      'var p = process.env.GH_ARGV_LOG;',
+      'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'process.stdout.write("[]");',
+      'process.exit(0);',
+    ].join(''));
+    let mutationCalled = { value: false };
+    const { server: srv, close: cs } = await startServer(async (req, res) => {
+      if (req.method === 'GET') {
+        if (!mutationCalled.value) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+          }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          fields: { summary: 'Test issue', status: { name: 'In Progress' }, labels: ['project-test', 'review'] },
+        }));
+      } else {
+        await drainBody(req);
+        mutationCalled.value = true;
+        res.writeHead(204);
+        res.end();
+      }
+    });
+    const port = srv.address().port;
+    const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+    try {
+      const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test'], { ...env, CLAIM_REQUIRED_CHECKS: '' }, 10000);
+      assert.strictEqual(r.status, 0);
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.success, true);
+      assert.strictEqual(out.reason, 'claimed');
+      assert.deepStrictEqual(out.labelsAfter, ['project-test', 'review']);
+    } finally {
+      await cs();
+      cleanup(gh);
+    }
+  });
+  });
+
   after(() => {
     // No temp dirs to clean; each test cleans up in its own finally block.
   });
