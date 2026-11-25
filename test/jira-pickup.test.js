@@ -129,6 +129,22 @@ describe('determinePrStatus', () => {
     const r = determinePrStatus({ prState: 'MERGED', mergedAt: new Date(Date.now() - 60 * 60000).toISOString(), mergeCommit: 'abc', ciStatus: 'pending', graceMinutes: 30 });
     assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'closing_ci_stuck');
   });
+  test('MERGED + unparseable mergedAt → work:false, closing_ci_stuck', () => {
+    const r = determinePrStatus({ prState: 'MERGED', mergedAt: 'not-a-date', mergeCommit: 'abc', ciStatus: 'pending', graceMinutes: 30 });
+    assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'closing_ci_stuck');
+  });
+  test('MERGED + empty mergedAt → work:false, none', () => {
+    const r = determinePrStatus({ prState: 'MERGED', mergedAt: '', mergeCommit: 'abc', ciStatus: 'pending', graceMinutes: 30 });
+    assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'none');
+  });
+  test('MERGED + 10-min-future mergedAt → closing_ci_pending', () => {
+    const r = determinePrStatus({ prState: 'MERGED', mergedAt: new Date(Date.now() + 10 * 60000).toISOString(), mergeCommit: 'abc', ciStatus: 'pending', graceMinutes: 30 });
+    assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'closing_ci_pending');
+  });
+  test('MERGED + 10-years-future mergedAt → closing_ci_pending', () => {
+    const r = determinePrStatus({ prState: 'MERGED', mergedAt: new Date(Date.now() + 10 * 365 * 24 * 60 * 60000).toISOString(), mergeCommit: 'abc', ciStatus: 'pending', graceMinutes: 30 });
+    assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'closing_ci_pending');
+  });
   test('CLOSED → pr_unclear', () => {
     const r = determinePrStatus({ prState: 'CLOSED', mergedAt: null, mergeCommit: null, ciStatus: 'green', graceMinutes: 30 });
     assert.strictEqual(r.work, false); assert.strictEqual(r.reason, 'pr_unclear');
