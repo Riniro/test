@@ -1738,6 +1738,32 @@ describe('pickup round 3', () => {
     assert.ok(!/ready_for_merge|readiness|confirmed|verdict|"ci"|accept/i.test(text), 'no readiness wording: ' + text);
     assert.deepStrictEqual(r.jiraCalls.filter((c) => !c.startsWith('GET ')), [], 'no Jira writes');
   });
+
+  // ==========================================================================
+  // KAN-18 — empty CLAIM_REQUIRED_CHECKS must NOT disable the CI gate
+  // ==========================================================================
+
+  describe('KAN-18: empty CLAIM_REQUIRED_CHECKS', () => {
+    const EMPTY_VALUES = ['', '   ', ',', ' , , '];
+
+    for (const val of EMPTY_VALUES) {
+      test('empty CLAIM_REQUIRED_CHECKS ("' + val.replace(/"/g, '\\"') + '") → closing is not allowed', async () => {
+        // GREEN = two default required checks completed/success. With empty required set,
+        // allRequiredChecksGreen returns false (not true), so ci is NOT green and closing is blocked.
+        const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: val });
+        assert.notStrictEqual(r.out.reason, 'closing', 'empty CLAIM_REQUIRED_CHECKS must NOT produce closing');
+        assert.strictEqual(r.out.reason, 'closing_ci_pending');
+        assert.strictEqual(r.out.work, false);
+      });
+    }
+
+    // Control: a matching non-empty CLAIM_REQUIRED_CHECKS with all required present → closing IS allowed,
+    // proving the variable reaches the product.
+    test('control: matching non-empty CLAIM_REQUIRED_CHECKS + all present → closing', async () => {
+      const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: 'Tests (ubuntu-latest),Tests (windows-latest)' });
+      assert.strictEqual(r.out.reason, 'closing');
+    });
+  });
 });
 
 // ==========================================================================
