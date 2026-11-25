@@ -772,7 +772,7 @@ describe('CLI process tests', () => {
     fs.writeFileSync(stubPath, [
       'const a=process.argv.slice(2).join(" ");',
       'if (a.includes("pr list")) {',
-      '  process.stdout.write(JSON.stringify({ total_count: 0, check_runs: []})+ "\\n");',
+      '  process.stdout.write(JSON.stringify([])+ "\\n");',
       '} else if (a.includes("pr view")) {',
       '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
       '} else if (a.includes("check-runs")) {',

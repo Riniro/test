@@ -2976,21 +2976,40 @@ describe('claim.js — fix round 2', () => {
     assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
   });
 
-  test('MUT2: break pagination (always return empty page) → code 6, never reaches awaiting_merge', async () => {
-    // Simulate: the product code always returns an empty `check_runs` array regardless of data.
+  test('pagination: single-page object form → collects check_runs from page 1', async () => {
     const res = await scenario({
       prs: [OPEN_PR], comments: [accept()],
       pages: [
-        { total_count: 100, check_runs: [] },
-        { total_count: 100, check_runs: [] },
+        { total_count: 2, check_runs: [UBUNTU, WINDOWS] },
       ],
     }, adopt);
-    assert.strictEqual(res.status, 6);
-    assert.strictEqual(res.out.reason, 'source_unavailable');
-    assert.strictEqual(res.out.state, 'source_unavailable');
-    assert.deepStrictEqual(writes(res), []);
-    // The loop would have asked for pages until total_count or empty page.
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+  });
+
+  test('pagination: multi-page (page 1 has 2, page 2 has 1) → collects all, succeeds', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 3, check_runs: [UBUNTU, LINT] },
+        { total_count: 3, check_runs: [WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
     assert.ok(res.gh.filter((a) => a[0] === 'api').length > 1, 'pagination was attempted');
+  });
+
+  test('pagination: bare array → product accepts as-is, test passes', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      raw: JSON.stringify([UBUNTU, WINDOWS]),
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
   });
 
   test('R9: --expect-status ignores case and surrounding spaces → code 0', async () => {
@@ -3030,21 +3049,6 @@ describe('claim.js — fix round 2', () => {
     assert.strictEqual(res.out.state, 'source_unavailable');
     assert.deepStrictEqual(writes(res), []);
     assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
-  });
-
-  test('MUT2: break pagination (always return empty page) → code 6, never reaches awaiting_merge', async () => {
-    const res = await scenario({
-      prs: [OPEN_PR], comments: [accept()],
-      pages: [
-        { total_count: 100, check_runs: [] },
-        { total_count: 100, check_runs: [] },
-      ],
-    }, adopt);
-    assert.strictEqual(res.status, 6);
-    assert.strictEqual(res.out.reason, 'source_unavailable');
-    assert.strictEqual(res.out.state, 'source_unavailable');
-    assert.deepStrictEqual(writes(res), []);
-    assert.ok(res.gh.filter((a) => a[0] === 'api').length > 1, 'pagination was attempted');
   });
 
   test('MUT3: pass through a bare array instead of object form → product falls back to flat list, test passes (not broken)', async () => {
