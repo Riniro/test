@@ -97,7 +97,7 @@
 
 | Инструмент | Способ |
 |---|---|
-| `Bash` (orca, git, node), `Read`, `Write`, `Grep`, `Agent` (субагент `web-fetch`), `ToolSearch` (загрузка схемы `WebSearch`); отложенный `WebSearch` (два запроса, вернули результаты со ссылками) | ВЫЗОВ (7 инструментов; ревьюер независимо повторил `WebSearch` и загрузку через `ToolSearch`) |
+| `Bash` (orca, git, node), `Read`, `Write`, `Grep`, `Agent` (субагент `web-fetch`), `ToolSearch` (загрузка схемы `WebSearch`); отложенный `WebSearch` (два запроса, вернули результаты со ссылками) | ВЫЗОВ (7 инструментов; `WebSearch` и загрузку через `ToolSearch` независимо повторил ревьюер **второго круга**, на `dc688ae`; ревьюер последнего круга их не вызывал) |
 | `Edit`, `Glob`, `PowerShell`, `Skill`, `AskUserQuestion`, `ScheduleWakeup`, `SendFeedback`, `ReportFindings`, `ShareOnboardingGuide`, `Workflow`, `Artifact`, `ListAgents` | ЧТЕНИЕ списка инструментов сессии; в этом прогоне не вызывались — НЕПРОВЕРЕНО |
 | отложенные (схема грузится через `ToolSearch`): `Monitor`, `SendMessage`, `TaskStop`, `CronCreate`/`CronDelete`/`CronList`, `NotebookEdit`, `EnterPlanMode`/`ExitPlanMode`, `EnterWorktree`/`ExitWorktree`, `ArtifactComments`, `ArtifactData`, `PushNotification`, `RemoteTrigger`, `PublishPlugin`, `DesignSync`, `EndConversation`, `ListMcpResourcesTool`, `ReadMcpResourceTool`, `ReadMcpResourceDirTool` | ЧТЕНИЕ списка; НЕПРОВЕРЕНО |
 
@@ -111,8 +111,8 @@
 - Поиск: `WebSearch` — ВЫЗОВ, работает (режим `standard`).
 - **Прямого инструмента чтения страниц (`WebFetch`) в списке главной сессии нет** (ЧТЕНИЕ списка).
   Страницы читает субагент `web-fetch`, у которого `WebFetch` есть. ВЫЗОВ: `https://nodejs.org/api/test.html`
-  → «Test runner | Node.js v26.13.1 Documentation», HTTP 200 (вызов координатора; ревьюер чтение страницы не повторял,
-но повторил `WebSearch`).
+  → «Test runner | Node.js v26.13.1 Documentation», HTTP 200 (вызов координатора). Чтение страницы не повторял
+  ни один ревьюер; `WebSearch` повторял только ревьюер второго круга, на `dc688ae`.
 
 ### 2.3 MCP
 
