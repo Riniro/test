@@ -1800,14 +1800,15 @@ describe('claim.js — mandatory check-runs gate', () => {
   // Helper: build an inline gh stub that writes check-runs from env var.
   // The existing passing adoptExisting tests use simple inline stubs that bypass routing:
   // they always write the expected JSON and exit. This helper does the same.
-  // The check-runs JSON comes from CHECK_RUNS env var.
+  // The check-runs JSON comes from CHECK_RUNS env var — but is now wrapped in the object form.
   function inlineCheckRunsStub() {
     return [
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
-      '  process.stdout.write(process.env.CHECK_RUNS || "[]" + "\\n");',
+      '  var raw = process.env.CHECK_RUNS || "{}";',
+      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); } catch { process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); }',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("view") !== -1) {',
@@ -1825,14 +1826,15 @@ describe('claim.js — mandatory check-runs gate', () => {
   }
 
   // Helper: build gh argv stub that answers pr list, pr view, and check-runs
-  // from environment variables.
+  // from environment variables — in the object form.
   function checkRunsArgvStub(envVarName) {
     return [
       'var fs = require("fs");',
       'var p = process.env.GH_ARGV_LOG;',
       'if (p) fs.appendFileSync(p, JSON.stringify(process.argv.slice(2)) + "\\n");',
       'if (process.argv.slice(2).some(function (a) { return a.slice(-11) === "/check-runs"; })) {',
-      '  process.stdout.write(process.env.' + envVarName + ' || "[]" + "\\n");',
+      '  var raw = process.env.' + envVarName + ' || "{}";',
+      '  try { var d = JSON.parse(raw); if (d && Array.isArray(d.check_runs)) process.stdout.write(raw + "\\n"); else process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); } catch { process.stdout.write(JSON.stringify({ total_count: 0, check_runs: [] }) + "\\n"); }',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("list") !== -1) {',
       '  process.stdout.write(process.env.CLAIM_PR_LIST || "[]" + "\\n");',
       '} else if (process.argv.indexOf("pr") !== -1 && process.argv.indexOf("view") !== -1) {',
@@ -1901,10 +1903,13 @@ describe('claim.js — mandatory check-runs gate', () => {
 
   const GATE_ACCOUNT = 'gate123';
   const HEAD_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
-  const BOTH_PASSING = JSON.stringify([
-    { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-    { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
-  ]);
+  const BOTH_PASSING = JSON.stringify({
+    total_count: 2,
+    check_runs: [
+      { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+      { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+    ],
+  });
 
   // AC1: обе обязательные проверки completed/success → код 4, awaiting_merge
   test('AC1: both checks passed → code 4, awaiting_merge', async () => {
@@ -1942,10 +1947,13 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const bothOnePending = JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
-      ]);
+      const bothOnePending = JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
+        ],
+      });
       const envWithPr = { ...env, CHECK_RUNS: bothOnePending, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
@@ -1970,9 +1978,12 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const onlyOne = JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-      ]);
+      const onlyOne = JSON.stringify({
+        total_count: 1,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      });
       const envWithPr = { ...env, CHECK_RUNS: onlyOne, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
@@ -1996,10 +2007,13 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const oneFail = JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
-      ]);
+      const oneFail = JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
+        ],
+      });
       const envWithPr = { ...env, CHECK_RUNS: oneFail, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
@@ -2023,10 +2037,13 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const nullConc = JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
-      ]);
+      const nullConc = JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      });
       const envWithPr = { ...env, CHECK_RUNS: nullConc, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
@@ -2128,21 +2145,33 @@ describe('claim.js — mandatory check-runs gate', () => {
 
     const scenarios = [
       { desc: 'both passing', checkRuns: BOTH_PASSING, expectedCode: 4, expectedState: 'awaiting_merge' },
-      { desc: 'one pending', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'missing', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'failure', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'null conclusion', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'one pending', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'missing', checkRuns: JSON.stringify({
+        total_count: 1,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'failure', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'null conclusion', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
     ];
 
     try {
@@ -2239,9 +2268,12 @@ describe('claim.js — mandatory check-runs gate', () => {
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
       // Only "Lint" passes — default "Tests" are missing, so should NOT be awaiting_merge
-      const lintOnly = JSON.stringify([
-        { name: 'Lint', status: 'completed', conclusion: 'success' },
-      ]);
+      const lintOnly = JSON.stringify({
+        total_count: 1,
+        check_runs: [
+          { id: 3, name: 'Lint', status: 'completed', conclusion: 'success' },
+        ],
+      });
       const envWithPr = {
         ...env,
         CHECK_RUNS: lintOnly,
@@ -2270,10 +2302,13 @@ describe('claim.js — mandatory check-runs gate', () => {
     const port = srv.address().port;
     const env = envForCli(gh, port, path.join(gh, 'gh.js'));
     try {
-      const bothQueued = JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'queued', conclusion: null },
-        { name: 'Tests (windows-latest)', status: 'queued', conclusion: null },
-      ]);
+      const bothQueued = JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'queued', conclusion: null },
+          { id: 2, name: 'Tests (windows-latest)', status: 'queued', conclusion: null },
+        ],
+      });
       const envWithPr = { ...env, CHECK_RUNS: bothQueued, CLAIM_PR_LIST: JSON.stringify([
         { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
       ]) };
@@ -2304,7 +2339,7 @@ describe('claim.js — mandatory check-runs gate', () => {
       '} else if (a[0] === "pr" && a[1] === "view") {',
       '  process.stdout.write(JSON.stringify({ number: 42, state: st.prState, headRefOid: "' + HEAD_SHA + '", statusCheckRollup: null }));',
       '} else if (a[0] === "api" && a[1].slice(-11) === "/check-runs") {',
-      '  process.stdout.write(JSON.stringify({ check_runs: st.checkRuns }));',
+      '  process.stdout.write(JSON.stringify({ total_count: st.checkRuns.total_count, check_runs: st.checkRuns.check_runs }));',
       '} else {',
       '  process.stdout.write("[]");',
       '}',
@@ -2712,6 +2747,68 @@ describe('claim.js — fix round 2', () => {
     assert.deepStrictEqual(writes(res), []);
   });
 
+  // ---- MINOR 7 (continued): object-form and multi-page coverage for fetchCheckRunsForSha --------
+
+  test('m7.1: single-page response with total_count smaller than actual items → still returns what was received', async () => {
+    // total_count says 1 but the server actually sent 2 items — the product code should still return them.
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 1, check_runs: [UBUNTU, WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+    // Only one page was requested since total_count < actual items.
+    assert.ok(res.gh.filter((a) => a[0] === 'api').length === 1, 'only one page asked');
+  });
+
+  test('m7.2: single-page with total_count absent → returns check_runs, no paging loop', async () => {
+    // Without total_count the product returns immediately after the first page.
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { check_runs: [UBUNTU, WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+    assert.ok(res.gh.filter((a) => a[0] === 'api').length === 1, 'only one page asked when total_count absent');
+  });
+
+  test('m7.3: multi-page where required check is on page 2 → still found, code 4', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 4, check_runs: [UBUNTU, { name: 'build', status: 'completed', conclusion: 'success' }] },
+        { total_count: 4, check_runs: [WINDOWS, { name: 'deploy', status: 'completed', conclusion: 'success' }] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+    assert.ok(res.gh.filter((a) => a[0] === 'api').length === 2, 'two pages requested');
+    // Assert both page calls contain the repo and SHA.
+    const apiCalls = res.gh.filter((a) => a[0] === 'api');
+    assert.ok(apiCalls[0].some((x) => x.includes('repos/Riniro/test')), 'page 1 has repo in path');
+    assert.ok(apiCalls[1].some((x) => x.includes('repos/Riniro/test')), 'page 2 has repo in path');
+  });
+
+  test('m7.4: gh exit 1 on page 2 → code 6', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()], failPage: 2,
+      pages: [
+        { total_count: 2, check_runs: [UBUNTU] },
+        { total_count: 2, check_runs: [WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+  });
+
   // ---- MINOR 8 — no pointless PUT ------------------------------------------------------------------
 
   test('m8: awaiting_merge with labels already in the target state → no PUT, no readback', async () => {
@@ -2863,6 +2960,48 @@ describe('claim.js — fix round 2', () => {
     assert.strictEqual(res.state.status, 'To Do');
   });
 
+  // ---- Edge cases: missing check_runs field and bare-array fallback ----------------------------
+
+  test('missing check_runs field → source_unavailable (code 6)', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 2 }, // check_runs is missing
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 6);
+    assert.strictEqual(res.out.reason, 'source_unavailable');
+    assert.strictEqual(res.out.state, 'source_unavailable');
+    assert.deepStrictEqual(writes(res), []);
+    assert.deepStrictEqual(res.state.labels, INITIAL_LABELS);
+  });
+
+  test('pagination: single-page object form → collects check_runs from page 1', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 2, check_runs: [UBUNTU, WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+  });
+
+  test('pagination: multi-page (page 1 has 2, page 2 has 1) → collects all, succeeds', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      pages: [
+        { total_count: 3, check_runs: [UBUNTU, LINT] },
+        { total_count: 3, check_runs: [WINDOWS] },
+      ],
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+    assert.ok(res.gh.filter((a) => a[0] === 'api').length > 1, 'pagination was attempted');
+  });
+
   test('R9: --expect-status ignores case and surrounding spaces → code 0', async () => {
     for (const expected of ['in review', '  IN REVIEW  ', ' In Review']) {
       const res = await scenario({ prs: [] }, [...GOOD_BASE, '--transition-id', '5', '--expect-status', expected]);
@@ -2885,6 +3024,18 @@ describe('claim.js — fix round 2', () => {
       assert.notStrictEqual(res.out.readiness.verdictSha, HEAD);
     });
   }
+
+  // ---- Edge cases: missing check_runs field and bare-array fallback ----------------------------
+
+  test('bare array fallback: product accepts flat list → success', async () => {
+    const res = await scenario({
+      prs: [OPEN_PR], comments: [accept()],
+      raw: JSON.stringify([UBUNTU, WINDOWS]),
+    }, adopt);
+    assert.strictEqual(res.status, 4);
+    assert.strictEqual(res.out.state, 'awaiting_merge');
+    assert.strictEqual(res.out.readiness.ci, true);
+  });
 });
 
 // ==========================================================================
@@ -2900,7 +3051,7 @@ describe('claim.js — gh pr view usability and mode (R2, R3.5)', () => {
       'var a = process.argv.slice(2);',
       'if (a[0] === "pr" && a[1] === "list") process.stdout.write(process.env.R2_LIST);',
       'else if (a[0] === "pr" && a[1] === "view") process.stdout.write(process.env.R2_VIEW);',
-      'else if (a[0] === "api") process.stdout.write(JSON.stringify({ check_runs: [{ name: "build", status: "completed", conclusion: "success" }] }));',
+      'else if (a[0] === "api") process.stdout.write(JSON.stringify({ total_count: 1, check_runs: [{ id: 1, name: "build", status: "completed", conclusion: "success" }] }));',
       'process.exit(0);',
     ].join('\n'));
     const calls = [];
