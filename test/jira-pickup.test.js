@@ -1824,6 +1824,16 @@ describe('pickup round 3', () => {
       assert.strictEqual(r.out.reason, 'closing');
       assert.strictEqual(r.out.work, true);
     });
+
+    // Control B: variable has double-space AND CI checks also have matching double-space names → should be closing
+    test('control B: double-space in both variable AND check names → closing', async () => {
+      const r = await closingWith([
+        { name: 'Tests' + SP + SP + '(ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+      ], { CLAIM_REQUIRED_CHECKS: 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)' });
+      assert.strictEqual(r.out.reason, 'closing');
+      assert.strictEqual(r.out.work, true);
+    });
   });
 });
 
