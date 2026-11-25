@@ -2575,6 +2575,323 @@ describe('claim.js — mandatory check-runs gate', () => {
   });
   });
 
+  // ==========================================================================
+  // KAN-20 — whitespace in CLAIM_REQUIRED_CHECKS: spaces/tabs/empty around comma are tolerated,
+  //          spaces inside a name are not.
+  // ==========================================================================
+
+  describe('KAN-20: whitespace in CLAIM_REQUIRED_CHECKS', () => {
+    const BOTH_PASSING = JSON.stringify({
+      total_count: 2,
+      check_runs: [
+        { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+      ],
+    });
+    const SP = ' ';
+    const TAB = '\t';
+
+    // Values that SHOULD be tolerated — CI green, awaiting_merge (code 4)
+    const TOLERATED = [
+      SP + 'Tests (ubuntu-latest)' + SP + ',' + SP + 'Tests (windows-latest)' + SP,
+      TAB + 'Tests (ubuntu-latest)' + TAB + ',' + TAB + 'Tests (windows-latest)' + TAB,
+      'Tests (ubuntu-latest),' + SP + ',Tests (windows-latest)',
+      'Tests (ubuntu-latest),,Tests (windows-latest)',
+    ];
+
+    // Value that should NOT be tolerated — space inside name, review_pending (code 0)
+    const REJECTED = 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)';
+
+    // Control A: single-space inside name (no extra space) → should be awaiting_merge
+    const CONTROL_A = 'Tests (ubuntu-latest),Tests (windows-latest)';
+
+    // Control B: same rejected variable name but GH checks have matching double-space names → awaiting_merge
+    const CONTROL_B_GH_DUB = 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)';
+
+    for (const val of TOLERATED) {
+      test('tolerated whitespace in CLAIM_REQUIRED_CHECKS (' + JSON.stringify(val) + ') → awaiting_merge', async () => {
+        const gh = mkTempDir('kan20-tol-claim');
+        const logPath = path.join(gh, 'gh-argv.jsonl');
+        fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
+        const preLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '(none)';
+        fs.writeFileSync(path.join(gh, 'pre-log.txt'), preLog);
+        let mutationCalled = { value: false };
+        const { server: srv, close: cs } = await startServer(async (req, res) => {
+          if (req.method === 'GET') {
+            if (req.url.endsWith('/myself')) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ accountId: GATE_ACCOUNT }));
+              return;
+            }
+            if (req.url.endsWith('/comment')) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                comments: [{
+                  id: '1',
+                  body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+                  author: { accountId: GATE_ACCOUNT },
+                }],
+              }));
+              return;
+            }
+            if (!mutationCalled.value) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+              }));
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-awaiting-merge'] },
+            }));
+          } else if (req.method === 'PUT') {
+            await drainBody(req);
+            mutationCalled.value = true;
+            res.writeHead(204);
+            res.end();
+          } else {
+            await drainBody(req);
+            res.writeHead(200);
+            res.end();
+          }
+        });
+        const port = srv.address().port;
+        const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+        try {
+          const envWithPr = {
+            ...env,
+            CHECK_RUNS: BOTH_PASSING,
+            CLAIM_REQUIRED_CHECKS: val,
+            CLAIM_PR_LIST: JSON.stringify([
+              { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+            ]),
+          };
+          const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+          assert.strictEqual(r.status, 4);
+          const out = JSON.parse(r.stdout);
+          assert.strictEqual(out.state, 'awaiting_merge');
+        } finally {
+          await cs();
+          cleanup(gh);
+        }
+      });
+    }
+
+    test('rejected space-inside-name in CLAIM_REQUIRED_CHECKS → review_pending, not awaiting_merge', async () => {
+      const gh = mkTempDir('kan20-rej-claim');
+      const logPath = path.join(gh, 'gh-argv.jsonl');
+      fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
+      let mutationCalled = { value: false };
+      const { server: srv, close: cs } = await startServer(async (req, res) => {
+        if (req.method === 'GET') {
+          if (req.url.endsWith('/myself')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accountId: GATE_ACCOUNT }));
+            return;
+          }
+          if (req.url.endsWith('/comment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              comments: [{
+                id: '1',
+                body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+                author: { accountId: GATE_ACCOUNT },
+              }],
+            }));
+            return;
+          }
+          if (!mutationCalled.value) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+            }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-in-review'] },
+          }));
+        } else if (req.method === 'PUT') {
+          await drainBody(req);
+          mutationCalled.value = true;
+          res.writeHead(204);
+          res.end();
+        } else {
+          await drainBody(req);
+          res.writeHead(200);
+          res.end();
+        }
+      });
+      const port = srv.address().port;
+      const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+      try {
+        const envWithPr = {
+          ...env,
+          CHECK_RUNS: BOTH_PASSING,
+          CLAIM_REQUIRED_CHECKS: REJECTED,
+          CLAIM_PR_LIST: JSON.stringify([
+            { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+          ]),
+        };
+        const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+        assert.strictEqual(r.status, 0);
+        const out = JSON.parse(r.stdout);
+        assert.strictEqual(out.state, 'review_pending');
+        assert.notStrictEqual(out.state, 'awaiting_merge');
+      } finally {
+        await cs();
+        cleanup(gh);
+      }
+    });
+
+    // Control A: same as value 5 but without the extra space → should be awaiting_merge
+    test('control A: single-space CLAIM_REQUIRED_CHECKS (no extra space) → awaiting_merge', async () => {
+      const gh = mkTempDir('kan20-ca-claim');
+      const logPath = path.join(gh, 'gh-argv.jsonl');
+      fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
+      let mutationCalled = { value: false };
+      const { server: srv, close: cs } = await startServer(async (req, res) => {
+        if (req.method === 'GET') {
+          if (req.url.endsWith('/myself')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accountId: GATE_ACCOUNT }));
+            return;
+          }
+          if (req.url.endsWith('/comment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              comments: [{
+                id: '1',
+                body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+                author: { accountId: GATE_ACCOUNT },
+              }],
+            }));
+            return;
+          }
+          if (!mutationCalled.value) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+            }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-awaiting-merge'] },
+          }));
+        } else if (req.method === 'PUT') {
+          await drainBody(req);
+          mutationCalled.value = true;
+          res.writeHead(204);
+          res.end();
+        } else {
+          await drainBody(req);
+          res.writeHead(200);
+          res.end();
+        }
+      });
+      const port = srv.address().port;
+      const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+      try {
+        const envWithPr = {
+          ...env,
+          CHECK_RUNS: BOTH_PASSING,
+          CLAIM_REQUIRED_CHECKS: CONTROL_A,
+          CLAIM_PR_LIST: JSON.stringify([
+            { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+          ]),
+        };
+        const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
+        // Debug
+        if (fs.existsSync(logPath)) {
+          fs.writeFileSync('C:\\Users\\Ilya\\orca\\workspaces\\test\\kan20-worker\\.debug-gh-log-a.jsonl', fs.readFileSync(logPath, 'utf8'));
+        }
+        assert.strictEqual(r.status, 4);
+        const out = JSON.parse(r.stdout);
+        assert.strictEqual(out.state, 'awaiting_merge');
+      } finally {
+        await cs();
+        cleanup(gh);
+      }
+    });
+
+    // Control B: rejected variable name but GH checks have matching double-space names → awaiting_merge
+    test('control B: double-space in both variable AND check names → awaiting_merge', async () => {
+      const gh = mkTempDir('kan20-cb-claim');
+      const logPath = path.join(gh, 'gh-argv.jsonl');
+      fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
+      let mutationCalled = { value: false };
+      const { server: srv, close: cs } = await startServer(async (req, res) => {
+        if (req.method === 'GET') {
+          if (req.url.endsWith('/myself')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accountId: GATE_ACCOUNT }));
+            return;
+          }
+          if (req.url.endsWith('/comment')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              comments: [{
+                id: '1',
+                body: 'AI-REVIEW-VERDICT: ACCEPT sha=' + HEAD_SHA + ' dispatch=ctx_abc task=task_abc run=run_abc',
+                author: { accountId: GATE_ACCOUNT },
+              }],
+            }));
+            return;
+          }
+          if (!mutationCalled.value) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-ready'] },
+            }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            fields: { summary: 'Test issue', status: { name: 'To Do' }, labels: ['project-test', 'review', 'ai-awaiting-merge'] },
+          }));
+        } else if (req.method === 'PUT') {
+          await drainBody(req);
+          mutationCalled.value = true;
+          res.writeHead(204);
+          res.end();
+        } else {
+          await drainBody(req);
+          res.writeHead(200);
+          res.end();
+        }
+      });
+      const port = srv.address().port;
+      const env = envForCli(gh, port, path.join(gh, 'gh.js'));
+      try {
+        // Same as Control A but with double-space names in both env vars
+        const doubleSpaceChecks = JSON.stringify({
+          total_count: 2,
+          check_runs: [
+            { id: 1, name: 'Tests' + SP + SP + '(ubuntu-latest)', status: 'completed', conclusion: 'success' },
+            { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+          ],
+        });
+        const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], {
+          ...env,
+          CHECK_RUNS: doubleSpaceChecks,
+          CLAIM_REQUIRED_CHECKS: 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)',
+          CLAIM_PR_LIST: JSON.stringify([
+            { number: 42, state: 'OPEN', title: '[KAN-1] Fix bug', url: 'https://gh.test/Riniro/test/pull/42' },
+          ]),
+          GH_ARGV_LOG: logPath,
+        }, 10000);
+        assert.strictEqual(r.status, 4, r.stdout);
+        const out = JSON.parse(r.stdout);
+        assert.strictEqual(out.state, 'awaiting_merge');
+      } finally {
+        await cs();
+        cleanup(gh);
+      }
+    });
+  });
+
   after(() => {
     // No temp dirs to clean; each test cleans up in its own finally block.
   });
