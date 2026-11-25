@@ -2613,8 +2613,6 @@ describe('claim.js — mandatory check-runs gate', () => {
         const gh = mkTempDir('kan20-tol-claim');
         const logPath = path.join(gh, 'gh-argv.jsonl');
         fs.writeFileSync(path.join(gh, 'gh.js'), checkRunsArgvStub('CHECK_RUNS'));
-        const preLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '(none)';
-        fs.writeFileSync(path.join(gh, 'pre-log.txt'), preLog);
         let mutationCalled = { value: false };
         const { server: srv, close: cs } = await startServer(async (req, res) => {
           if (req.method === 'GET') {
@@ -2803,10 +2801,6 @@ describe('claim.js — mandatory check-runs gate', () => {
           ]),
         };
         const r = await runSpawn(CLI, ['--project', 'KAN', '--issue', 'KAN-1', '--repo', 'Riniro/test', '--adopt-existing'], { ...envWithPr, GH_ARGV_LOG: logPath }, 10000);
-        // Debug
-        if (fs.existsSync(logPath)) {
-          fs.writeFileSync('C:\\Users\\Ilya\\orca\\workspaces\\test\\kan20-worker\\.debug-gh-log-a.jsonl', fs.readFileSync(logPath, 'utf8'));
-        }
         assert.strictEqual(r.status, 4);
         const out = JSON.parse(r.stdout);
         assert.strictEqual(out.state, 'awaiting_merge');
