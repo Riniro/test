@@ -1748,10 +1748,12 @@ describe('pickup round 3', () => {
 
     for (const val of EMPTY_VALUES) {
       test('empty CLAIM_REQUIRED_CHECKS ("' + val.replace(/"/g, '\\"') + '") → closing is not allowed', async () => {
-        const r = await closingWith([], { CLAIM_REQUIRED_CHECKS: val });
+        // GREEN = two default required checks completed/success. With empty required set,
+        // allRequiredChecksGreen returns false (not true), so ci is NOT green and closing is blocked.
+        const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: val });
         assert.notStrictEqual(r.out.reason, 'closing', 'empty CLAIM_REQUIRED_CHECKS must NOT produce closing');
-        assert.ok(['closing_ci_pending', 'closing_ci_failed'].includes(r.out.reason),
-          'expected ci_pending/ci_failed for empty required, got: ' + r.out.reason);
+        assert.strictEqual(r.out.reason, 'closing_ci_pending');
+        assert.strictEqual(r.out.work, false);
       });
     }
 
