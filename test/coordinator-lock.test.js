@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   acquire,
@@ -10,6 +11,7 @@ import {
   status,
   heartbeat,
   forceRelease,
+  classifyOwner,
   lockDir,
 } from '../tools/coordinator/lock.js';
 
@@ -31,6 +33,29 @@ test('setup: create tmp stateDir', () => {
 after(() => {
   try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* */ }
 });
+
+
+// ------------------------------------------------------------------
+// Owner classification helpers (R3)
+// ------------------------------------------------------------------
+function deadPid() {
+  const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  return Number(r.stdout);
+}
+
+function ownerPath(repoKey) {
+  return path.join(lockDir({ stateDir, repoKey }), 'owner.json');
+}
+
+function patchOwner(repoKey, patch) {
+  const fp = ownerPath(repoKey);
+  const o = JSON.parse(fs.readFileSync(fp, 'utf8'));
+  fs.writeFileSync(fp, JSON.stringify({ ...o, ...patch }));
+}
+
+function makeOwnerDead(repoKey) {
+  patchOwner(repoKey, { pid: deadPid() });
+}
 
 // ------------------------------------------------------------------
 // 14. Два последовательных acquire с одним repoKey
@@ -164,6 +189,8 @@ test('forceRelease without confirm returns CONFIRMATION_REQUIRED; with confirm r
   assert.equal(fr.reason, 'CONFIRMATION_REQUIRED');
   assert.equal(status({ stateDir, repoKey }).held, true);
 
+  // The owner is this very (live) process: only a proven dead owner may be taken over.
+  makeOwnerDead(repoKey);
   const fr2 = forceRelease({ stateDir, repoKey, confirm: true, reason: 'test' });
   assert.equal(fr2.ok, true);
   assert.equal(status({ stateDir, repoKey }).held, false);
@@ -332,4 +359,104 @@ after(() => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   } catch { /* ignore */ }
+});
+
+// ------------------------------------------------------------------
+// R3 / R5.12 — force-release tells three owner states apart
+// ------------------------------------------------------------------
+test('R3: classifyOwner — dead only for this host with a pid that does not answer', () => {
+  const host = os.hostname();
+  assert.equal(classifyOwner({ pid: deadPid(), host }).state, 'dead');
+  assert.equal(classifyOwner({ pid: process.pid, host }).state, 'alive');
+  for (const o of [
+    { pid: deadPid(), host: host + '-other' }, // another host: a pid says nothing
+    { pid: process.pid, host: host + '-other' },
+    { host },                                  // no pid
+    { pid: 'abc', host },                      // pid is not a number
+    { pid: deadPid() },                        // no host
+    null,                                      // no owner.json
+    'text',
+  ]) {
+    const c = classifyOwner(o);
+    assert.equal(c.state, 'undetermined', JSON.stringify(o));
+    assert.ok(c.unverified && c.unverified.length > 0, 'the refusal must say what stayed unchecked');
+  }
+});
+
+test('R3: forceRelease removes the lock of a proven dead owner', () => {
+  const repoKey = 'fr-dead';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  makeOwnerDead(repoKey);
+  const fr = forceRelease({ stateDir, repoKey, confirm: true, reason: 'owner is gone' });
+  assert.equal(fr.ok, true);
+  assert.equal(status({ stateDir, repoKey }).held, false);
+});
+
+test('R3: forceRelease refuses a live owner and leaves the lock', () => {
+  const repoKey = 'fr-alive';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  const fr = forceRelease({ stateDir, repoKey, confirm: true, reason: 'looks stuck' });
+  assert.equal(fr.ok, false);
+  assert.equal(fr.reason, 'OWNER_NOT_DEAD');
+  assert.equal(fr.ownerState, 'alive');
+  assert.ok(fr.unverified);
+  assert.equal(status({ stateDir, repoKey }).held, true);
+});
+
+test('R3: forceRelease refuses a foreign host even though its pid does not exist here', () => {
+  const repoKey = 'fr-foreign';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  patchOwner(repoKey, { pid: deadPid(), host: os.hostname() + '-other' });
+  const fr = forceRelease({ stateDir, repoKey, confirm: true, reason: 'the reason string alone proves nothing' });
+  assert.equal(fr.ok, false);
+  assert.equal(fr.ownerState, 'undetermined');
+  assert.match(fr.unverified, /host/);
+  assert.equal(status({ stateDir, repoKey }).held, true);
+});
+
+test('R3: forceRelease refuses a missing, unreadable or pid-less owner.json', () => {
+  for (const [repoKey, setup] of [
+    ['fr-noowner', () => fs.rmSync(ownerPath('fr-noowner'))],
+    ['fr-garbage', () => fs.writeFileSync(ownerPath('fr-garbage'), '{not json')],
+    ['fr-nopid', () => patchOwner('fr-nopid', { pid: undefined })],
+    ['fr-strpid', () => patchOwner('fr-strpid', { pid: 'x' })],
+  ]) {
+    assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+    setup();
+    const fr = forceRelease({ stateDir, repoKey, confirm: true, reason: 'cleanup' });
+    assert.equal(fr.ok, false, repoKey);
+    assert.equal(fr.ownerState, 'undetermined', repoKey);
+    assert.equal(status({ stateDir, repoKey }).held, true, repoKey);
+  }
+});
+
+test('R3: the confirm/reason requirements are unchanged and checked first', () => {
+  const repoKey = 'fr-confirm';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  makeOwnerDead(repoKey);
+  assert.equal(forceRelease({ stateDir, repoKey, confirm: false, reason: 'x' }).reason, 'CONFIRMATION_REQUIRED');
+  assert.equal(forceRelease({ stateDir, repoKey, confirm: true, reason: '' }).reason, 'CONFIRMATION_REQUIRED');
+  assert.equal(status({ stateDir, repoKey }).held, true);
+});
+
+test('R3: status reports ownerState; processAlive is null for a foreign host', () => {
+  const repoKey = 'st-owner';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  const mine = status({ stateDir, repoKey });
+  assert.equal(mine.ownerState, 'alive');
+  assert.equal(mine.processAlive, true);
+  patchOwner(repoKey, { host: os.hostname() + '-other' });
+  const foreign = status({ stateDir, repoKey });
+  assert.equal(foreign.ownerState, 'undetermined');
+  assert.equal(foreign.processAlive, null, 'a foreign pid must not pose as an answer about the owner');
+});
+
+test('R3.5: acquire stays BUSY regardless of age: no automatic release by TTL', () => {
+  const repoKey = 'no-ttl-steal';
+  assert.equal(acquire({ stateDir, repoKey, meta: {} }).ok, true);
+  patchOwner(repoKey, { pid: deadPid(), heartbeatAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString() });
+  assert.equal(status({ stateDir, repoKey }).stale, true);
+  const again = acquire({ stateDir, repoKey, meta: {} });
+  assert.equal(again.ok, false);
+  assert.equal(again.reason, 'BUSY');
 });

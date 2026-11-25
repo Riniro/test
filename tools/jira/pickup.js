@@ -512,11 +512,10 @@ export async function main({ argv, env } = {}) {
 
     // Source unavailable?
     if (awaitingErr || readyErr) {
-      const err = awaitingErr || readyErr;
-      if (err.code === 'AUTH_FAILED' || err.code === 'SOURCE_UNAVAILABLE') {
-        printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: null, ready: null, inReview: null }, exitCode: 4 });
-        return;
-      }
+      // Any failed search is an unavailable source (not a code whitelist): "nothing found"
+      // is only a successful response with an empty list.
+      printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: null, ready: null, inReview: null }, exitCode: 4 });
+      return;
     }
 
     // ---- Check ai-in-review phase before ready ----
@@ -527,10 +526,8 @@ export async function main({ argv, env } = {}) {
     } catch (err) { inReviewErr = err; }
 
     if (inReviewErr) {
-      if (inReviewErr.code === 'AUTH_FAILED' || inReviewErr.code === 'SOURCE_UNAVAILABLE') {
-        printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: null }, exitCode: 4 });
-        return;
-      }
+      printResult({ work: false, reason: 'unavailable', issue: null, pr: null, counts: { awaitingMerge: awaitingIssues.length, ready: readyIssues.length, inReview: null }, exitCode: 4 });
+      return;
     }
 
     // ---- Process awaiting-merge ----

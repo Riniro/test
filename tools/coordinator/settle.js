@@ -12,6 +12,9 @@ import os from 'node:os';
 
 import { decide } from './settlement.js';
 
+// Settlement journal lock helpers — re-exported from the guard module.
+import { guardedSettlements } from '../settlement-guard.js';
+
 // ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
@@ -141,29 +144,89 @@ function collectWorkerDone(runId, taskId, dispatchId) {
     });
 
     if (result.error || result.status !== 0) {
-      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+      return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     }
 
     const out = result.stdout;
     if (typeof out !== 'string' || out.trim().length === 0) {
-      return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+      return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     }
 
     const list = parseWorkerList(out);
     const rec = list.find(r => r.dispatchId === dispatchId && r.taskId === taskId);
-    if (!rec) return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    if (!rec) return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
     return {
       found: true,
       recordFound: true,
-      status: rec.workerState || null,
-      dispatchStatus: rec.dispatchStatus || null,
+      state: rec.state || null,
       raw: rec,
       taskId,
       dispatchId,
     };
   } catch {
     // spawnSync does not throw; unreachable but kept for safety
-    return { found: false, recordFound: false, status: null, dispatchStatus: null, raw: null, taskId, dispatchId };
+    return { found: false, recordFound: false, state: null, raw: null, taskId, dispatchId };
+  }
+}
+
+/**
+ * Read the inbox for a run and look for a worker_done message whose payload
+ * matches the expected taskId and dispatchId.  Uses `inbox --terminal run:<runId>`
+ * which is the only method that does not consume messages.
+ *
+ * The match is made inside the queue walk on all three identifiers (run via
+ * `to`, taskId, dispatchId); a worker_done for another task or dispatch is
+ * skipped and the walk continues, so it cannot shadow ours.
+ *
+ * The call is bounded by `timeoutMs`.  If it is cut off, `diag.timedOut` is
+ * set so the caller can tell "inbox call timed out" from "no such letter";
+ * a timed-out call never yields a message.
+ *
+ * @param {string} runId
+ * @param {string} taskId
+ * @param {string} dispatchId
+ * @param {number} timeoutMs
+ * @param {{timedOut?: boolean}} [diag]  out-parameter
+ * @returns {object|null}  { type, to, payload: { taskId, dispatchId }, id } or null
+ */
+function collectInbox(runId, taskId, dispatchId, timeoutMs, diag = {}) {
+  try {
+    const launch = resolveOrcaLaunch();
+    const result = spawnSync(launch.executable, [
+      ...launch.prefixArgs,
+      'orchestration', 'inbox', '--terminal', 'run:' + runId, '--limit', '50', '--json',
+    ], {
+      encoding: 'utf8',
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+      timeout: timeoutMs,
+    });
+
+    if (result.error && result.error.code === 'ETIMEDOUT') {
+      diag.timedOut = true;
+      return null;
+    }
+    if (result.error || result.status !== 0) return null;
+
+    const out = result.stdout;
+    if (typeof out !== 'string' || out.trim().length === 0) return null;
+
+    const data = JSON.parse(out);
+    const messages = data?.result?.messages || [];
+
+    for (const msg of messages) {
+      if (msg.type !== 'worker_done') continue;
+      if (msg.to !== ('run:' + runId)) continue;
+      const p = msg.payload;
+      if (p && typeof p === 'object' && p.taskId === taskId && p.dispatchId === dispatchId) {
+        return { type: msg.type, to: msg.to, payload: p, id: msg.id };
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -238,36 +301,43 @@ function watch(args) {
   const deadline = start + args.deadlineMs;
   let deadlineExceeded = false;
 
-  let workerDoneResult = null;
-  let dispatchStatus = null;
+  let workerListResult = null;
+  let inboxMessage = null;
   let commit = null;
   let tests = { ran: false };
 
-  let foundWorkerDone = false;
-  let foundDispatchFinished = false;
+  let foundWorkerListSucceeded = false;
+  let foundInboxVerified = false;
+  let inboxTimedOut = false;
 
   while (Date.now() < deadline) {
-    // Collect worker_done
-    if (!foundWorkerDone) {
+    // Collect worker-list status independently
+    if (!foundWorkerListSucceeded) {
       const result = collectWorkerDone(args.run, args.task, args.dispatch);
-      workerDoneResult = result;
-      dispatchStatus = result.dispatchStatus;
+      workerListResult = result;
 
-      // recordFound = a record was found; found = worker_done actually succeeded
-      if (result.recordFound && result.status === 'succeeded') {
-        foundWorkerDone = true;
-      } else if (result.recordFound && result.status && result.status !== 'succeeded') {
-        // Dispatch is not succeeded — check if its own status is finished
-        if (result.dispatchStatus && ['completed', 'failed', 'stopped', 'abandoned'].includes(result.dispatchStatus)) {
-          foundDispatchFinished = true;
-          foundWorkerDone = true; // we have enough info
+      if (result.recordFound && result.state === 'succeeded') {
+        foundWorkerListSucceeded = true;
+      }
+    }
+
+    // Collect inbox message independently
+    if (!foundInboxVerified) {
+      // Bounded by the time left to the deadline (floor keeps the call usable).
+      const diag = {};
+      const msg = collectInbox(args.run, args.task, args.dispatch, Math.max(250, deadline - Date.now()), diag);
+      if (diag.timedOut) inboxTimedOut = true;
+      if (msg) {
+        const p = msg.payload;
+        if (p && p.taskId === args.task && p.dispatchId === args.dispatch) {
+          inboxMessage = msg;
+          foundInboxVerified = true;
         }
       }
     }
 
-    // Early-stop check
-    if (foundWorkerDone && foundDispatchFinished) break;
-    if (foundWorkerDone) break; // worker_done succeeded is enough
+    // Early-stop check: both independently confirmed
+    if (foundWorkerListSucceeded && foundInboxVerified) break;
 
     // Sleep until next poll (no busy-wait)
     const now = Date.now();
@@ -290,33 +360,44 @@ function watch(args) {
   // Run tests once after polling
   tests = collectTests(args.tests);
 
-  // Build evidence
+  // Build evidence for output
+  const workerDoneFound = (workerListResult?.state === 'succeeded') &&
+                          inboxMessage !== null &&
+                          inboxMessage.type === 'worker_done' &&
+                          inboxMessage.to === ('run:' + args.run) &&
+                          inboxMessage.payload &&
+                          inboxMessage.payload.taskId === args.task &&
+                          inboxMessage.payload.dispatchId === args.dispatch;
+
   const evidence = {
     workerDone: {
-      found: (workerDoneResult?.status === 'succeeded' &&
-              workerDoneResult?.recordFound &&
-              workerDoneResult?.taskId === args.task &&
-              workerDoneResult?.dispatchId === args.dispatch),
-      recordFound: workerDoneResult?.recordFound || false,
-      status: workerDoneResult?.status || null,
-      taskId: workerDoneResult?.taskId || args.task,
-      dispatchId: workerDoneResult?.dispatchId || args.dispatch,
-      workerState: workerDoneResult?.status || null,
+      found: workerDoneFound,
+      recordFound: workerListResult?.recordFound || false,
+      status: inboxMessage ? 'worker_done' : null,
+      taskId: inboxMessage?.payload?.taskId || args.task,
+      dispatchId: inboxMessage?.payload?.dispatchId || args.dispatch,
     },
-    dispatchStatus: dispatchStatus,
+    workerList: {
+      state: workerListResult?.state || null,
+      recordFound: workerListResult?.recordFound || false,
+    },
+    inboxVerified: foundInboxVerified,
+    inboxTimedOut: inboxTimedOut && !foundInboxVerified,
     commit: commit,
     tests: tests,
   };
 
   // Build dispatch/work/tests for decide()
-  // workerDone is non-null ONLY when the worker actually succeeded.
-  const workerDoneObj = (workerDoneResult?.recordFound && workerDoneResult?.status === 'succeeded')
+  // workerDone: confirmed only when inbox message matches AND worker-list says succeeded
+  const workerDoneObj = (workerListResult?.state === 'succeeded' && workerDoneFound)
     ? {
         taskId: args.task,
         dispatchId: args.dispatch,
-        status: workerDoneResult.status,
+        status: 'succeeded',
       }
     : null;
+
+  const dispatchStatus = workerListResult?.state || null;
 
   const dispatchObj = {
     workerDone: workerDoneObj,
@@ -336,6 +417,10 @@ function watch(args) {
     deadlineExceeded: deadlineExceeded,
   });
 
+  if (inboxTimedOut && !foundInboxVerified) {
+    verdictResult.reasons.push('INBOX_CALL_TIMED_OUT');
+  }
+
   // Determine exit code
   let exitCode = 0;
   switch (verdictResult.verdict) {
@@ -351,39 +436,84 @@ function watch(args) {
     recommendedRecovery = `orca orchestration worker-show --dispatch ${args.dispatch}`;
   }
 
-  // Determine alreadyRecorded
-  const journalPath = getJournalPath(args.repoKey);
-  const journal = readJournal(journalPath);
+  // Determine alreadyRecorded — done under the settlements lock (R1).
+  // guardedSettlements wraps the full read→mutate→write cycle.
   let alreadyRecorded = false;
-  const existingEntry = journal[args.dispatch];
 
-  if (existingEntry && existingEntry.verdict === verdictResult.verdict) {
-    alreadyRecorded = true;
-  } else if (existingEntry && existingEntry.verdict !== verdictResult.verdict) {
-    alreadyRecorded = false;
-    verdictResult.reasons.push('VERDICT_CHANGED');
+  const guardResult = guardedSettlements({
+    repoKey: args.repoKey,
+    lockRequired: true,
+    mutateFn: (journal) => {
+      let existingEntry = null;
+      try {
+        existingEntry = journal[args.dispatch];
+      } catch { /* ignore */ }
+
+      if (existingEntry && existingEntry.verdict === verdictResult.verdict) {
+        alreadyRecorded = true;
+      } else if (existingEntry && existingEntry.verdict !== verdictResult.verdict) {
+        alreadyRecorded = false;
+        verdictResult.reasons.push('VERDICT_CHANGED');
+      }
+
+      if (!alreadyRecorded) {
+        // Record to journal under lock — only when not already recorded
+        const entry = {
+          ...verdictResult,
+          evidence,
+          deadlineExceeded,
+          recommendedRecovery,
+          alreadyRecorded,
+          recordedAt: new Date().toISOString(),
+        };
+
+        // B1: preserve completedAction when rewriting the entry
+        if (existingEntry && existingEntry.completedAction) {
+          entry.completedAction = existingEntry.completedAction;
+        }
+
+        journal[args.dispatch] = entry;
+      }
+    },
+  });
+
+  if (guardResult.code !== 0) {
+    // The journal was not touched: busy (23), corrupt (24) or an I/O error
+    // (25).  Each keeps its own code so the caller knows which it was, and a
+    // corrupt journal is reported, never rewritten.
+    const entry = {
+      ...verdictResult,
+      evidence,
+      deadlineExceeded,
+      recommendedRecovery,
+      journalNotWritten: guardResult.reason,
+      recordedAt: new Date().toISOString(),
+    };
+    if (guardResult.reason === 'LOCK_BUSY') entry.lockBusy = true;
+    if (guardResult.reason === 'CORRUPT') entry.journalCorrupt = true;
+    process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+    return guardResult.code;
   }
 
-  // Record to journal
-  const entry = {
-    ...verdictResult,
-    evidence,
-    deadlineExceeded,
-    recommendedRecovery,
-    alreadyRecorded,
-    recordedAt: new Date().toISOString(),
-  };
-
-  if (!alreadyRecorded) {
-    journal[args.dispatch] = entry;
-    writeJournal(journalPath, journal);
+  // Print the entry (alreadyRecorded flag is set correctly in mutateFn)
+  // If alreadyRecorded=true, the journal was not modified (to keep file
+  // unchanged), so we rebuild the output entry with the correct flag.
+  let entryForOutput;
+  if (alreadyRecorded) {
+    entryForOutput = {
+      ...verdictResult,
+      evidence,
+      deadlineExceeded,
+      recommendedRecovery,
+      alreadyRecorded: true,
+      recordedAt: new Date().toISOString(),
+    };
+  } else {
+    entryForOutput = guardResult.journal[args.dispatch];
   }
-
-  // If already recorded, set the flag in the output
-  entry.alreadyRecorded = alreadyRecorded;
 
   // Print exactly one JSON object to stdout
-  process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+  process.stdout.write(JSON.stringify(entryForOutput, null, 2) + '\n');
 
   return exitCode;
 }

@@ -16,6 +16,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
+import { ghSpawn, searchPrsByKey, keyInTitle } from './find-pr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,71 +60,20 @@ function parseArgs(argv) {
 }
 
 // ==========================================================================
-// ghSpawn — async child-process wrapper (same pattern as pickup.js)
-// ==========================================================================
-
-function ghSpawn(argv, env) {
-  return new Promise((resolve) => {
-    const ghExec = (env && env.PICKUP_GH_EXEC) || 'gh';
-    let prefixArgs = [];
-    const raw = (env && env.PICKUP_GH_PREFIX_ARGS_JSON);
-    if (raw && raw !== '') {
-      try { prefixArgs = JSON.parse(raw); } catch { /* ignore */ }
-    }
-    const cmd = prefixArgs.concat([ghExec]).concat(argv || []);
-    const result = spawnSync(cmd[0], cmd.slice(1), {
-      cwd: process.cwd(),
-      env: { ...process.env, ...(env || {}) },
-      encoding: 'utf8',
-      shell: false,
-      timeout: 30000,
-    });
-    resolve({
-      status: result.error ? null : result.status,
-      stdout: result.stdout || '',
-      stderr: result.stderr || '',
-    });
-  });
-}
-
-// ==========================================================================
 // Output helper
 // ==========================================================================
 
+// Set to true immediately BEFORE the first request that can change Jira (labels or status), so that
+// it is already true when that request is cut short. Every answer states it explicitly: the exit code
+// cannot (6 is returned both before any mutation and after one), and the route must not guess.
+let mutationAttempted = false;
+
 function exitJson(statusCode, body) {
   // `state` is mandatory in every output and equals `reason`.
-  const out = { ...body };
+  const out = { ...body, mutationAttempted };
   if (out.reason !== undefined) out.state = out.reason;
   process.stdout.write(JSON.stringify(out) + '\n');
   process.exit(statusCode);
-}
-
-// ==========================================================================
-// PR search — same pattern as pickup.js searchPrsByKey
-// ==========================================================================
-
-async function searchPrsByKey(key, repo, env) {
-  const res = await ghSpawn(
-    ['pr', 'list', '--repo', repo, '--search', key, '--state', 'all', '--json',
-     'number,state,title,url', '--limit', '10'],
-    env
-  );
-  // Only a readable list answers the question. Empty stdout, invalid JSON or a structure that is
-  // not a list is a failed source (null), never "no PR": only a proper empty list means that.
-  if (res.status !== 0 || !res.stdout || !res.stdout.trim()) return null;
-  try {
-    const data = JSON.parse(res.stdout);
-    return Array.isArray(data) ? data : null;
-  } catch { return null; }
-}
-
-// ==========================================================================
-// Pure key-in-title check (same as pickup.js)
-// ==========================================================================
-
-function keyInTitle(key, title) {
-  const escaped = key.replace(/[-/]/g, '\\$&');
-  return new RegExp('\\b' + escaped + '\\b', 'i').test(title);
 }
 
 // ==========================================================================
@@ -381,6 +331,7 @@ export async function main({ argv, env } = {}) {
     let setResult;
     try {
       const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+      mutationAttempted = true;
       await client.setLabels({ creds, key: args.issue, labels: labelsAfter });
       setResult = { ok: true };
     } catch (err) {
@@ -415,6 +366,7 @@ export async function main({ argv, env } = {}) {
     if (args.transitionId) {
       try {
         const client = await import(pathToFileURL(path.join(__dirname, 'client.js')).href);
+        mutationAttempted = true;
         await client.transition({ creds, key: args.issue, transitionId: args.transitionId });
       } catch (err) {
         if (err.code === 'AUTH_FAILED') {
@@ -494,11 +446,18 @@ export async function main({ argv, env } = {}) {
     });
   }
 
-  let prView;
+  // The answer is usable only if it is an object carrying a PR. The check runs BEFORE any field
+  // access: JSON.parse("null") does not throw. A list, string, number, null or an object carrying
+  // neither requested field (`number`, `state`) is an unreadable mandatory source → code 6.
+  let prView = null;
   try {
     prView = JSON.parse(prViewRes.stdout);
   } catch {
-    // JSON parse failed → source_unavailable, zero mutations
+    prView = null;
+  }
+  const prViewUsable = prView !== null && typeof prView === 'object' && !Array.isArray(prView)
+    && (prView.number !== undefined || prView.state !== undefined);
+  if (!prViewUsable) {
     exitJson(6, {
       success: false,
       reason: 'source_unavailable',
@@ -510,7 +469,7 @@ export async function main({ argv, env } = {}) {
     });
   }
 
-  const headRefOid = prView.headRefOid || null;
+  const headRefOid = (typeof prView.headRefOid === 'string' && prView.headRefOid) ? prView.headRefOid : null;
   const statusCheckRollup = prView.statusCheckRollup || null;
 
   // ----------------------------------------------------------------
@@ -612,6 +571,7 @@ export async function main({ argv, env } = {}) {
     readbackLabels = labelsBefore;
   } else {
     try {
+      mutationAttempted = true;
       await mutateLabels({ creds, key: args.issue, labels: plannedLabels });
     } catch (err) {
       if (err.code === 'AUTH_FAILED') {
