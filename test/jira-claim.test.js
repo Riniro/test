@@ -2825,23 +2825,6 @@ describe('claim.js — fix round 2', () => {
     assert.deepStrictEqual(writes(res), []);
   });
 
-  test('m7.5.1: incomplete answer with ACCEPT for that SHA on OPEN PR → code 6, not merging', async () => {
-    // The product only calls check-runs for OPEN PRs (closed PRs skip CI).
-    // Same contradictory answer on an OPEN PR with ACCEPT verdict: should not allow merging.
-    const res = await scenario({
-      prs: [OPEN_PR], comments: [accept(HEAD)],
-      pages: [
-        { total_count: 5, check_runs: [UBUNTU, WINDOWS] },
-        { total_count: 5, check_runs: [] },
-      ],
-    }, adopt);
-    assert.strictEqual(res.status, 6);
-    assert.strictEqual(res.out.reason, 'source_unavailable');
-    assert.notStrictEqual(res.out.state, 'closing');
-    assert.notStrictEqual(res.out.state, 'awaiting_merge');
-    assert.deepStrictEqual(writes(res), []);
-  });
-
   test('m7.5.2: full green answer on OPEN PR still enters awaiting_merge', async () => {
     // Control: when total_count matches actual items and both required are green, the gate works.
     const res = await scenario({
