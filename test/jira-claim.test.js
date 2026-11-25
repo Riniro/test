@@ -2145,21 +2145,33 @@ describe('claim.js — mandatory check-runs gate', () => {
 
     const scenarios = [
       { desc: 'both passing', checkRuns: BOTH_PASSING, expectedCode: 4, expectedState: 'awaiting_merge' },
-      { desc: 'one pending', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'missing', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'failure', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
-      { desc: 'null conclusion', checkRuns: JSON.stringify([
-        { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
-        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
-      ]), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'one pending', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'in_progress', conclusion: null },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'missing', checkRuns: JSON.stringify({
+        total_count: 1,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'failure', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'failure' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
+      { desc: 'null conclusion', checkRuns: JSON.stringify({
+        total_count: 2,
+        check_runs: [
+          { id: 1, name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: null },
+          { id: 2, name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+        ],
+      }), expectedCode: 0, expectedState: 'review_pending' },
     ];
 
     try {
