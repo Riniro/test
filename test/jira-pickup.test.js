@@ -1780,6 +1780,61 @@ describe('pickup round 3', () => {
       assert.strictEqual(r.out.reason, 'closing');
     });
   });
+
+  // ==========================================================================
+  // KAN-20 — whitespace in CLAIM_REQUIRED_CHECKS: spaces/tabs/empty around comma are tolerated,
+  //          spaces inside a name are not.
+  // ==========================================================================
+
+  describe('KAN-20: whitespace in CLAIM_REQUIRED_CHECKS', () => {
+    const SP = ' ';
+    const TAB = '\t';
+
+    // Values that SHOULD be tolerated — CI green → closing
+    const TOLERATED = [
+      SP + 'Tests (ubuntu-latest)' + SP + ',' + SP + 'Tests (windows-latest)' + SP,
+      TAB + 'Tests (ubuntu-latest)' + TAB + ',' + TAB + 'Tests (windows-latest)' + TAB,
+      'Tests (ubuntu-latest),' + SP + ',Tests (windows-latest)',
+      'Tests (ubuntu-latest),,Tests (windows-latest)',
+    ];
+
+    // Value that should NOT be tolerated — space inside name → closing_ci_pending, work: false
+    const REJECTED = 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)';
+
+    // Control A: single-space inside name (no extra space) → should be closing
+    const CONTROL_A = 'Tests (ubuntu-latest),Tests (windows-latest)';
+
+    for (const val of TOLERATED) {
+      test('tolerated whitespace in CLAIM_REQUIRED_CHECKS (' + JSON.stringify(val) + ') → closing', async () => {
+        const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: val });
+        assert.strictEqual(r.out.reason, 'closing');
+        assert.strictEqual(r.out.work, true);
+      });
+    }
+
+    test('rejected space-inside-name in CLAIM_REQUIRED_CHECKS → closing_ci_pending, work: false', async () => {
+      const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: REJECTED });
+      assert.strictEqual(r.out.reason, 'closing_ci_pending');
+      assert.strictEqual(r.out.work, false);
+    });
+
+    // Control A: same as value 5 but without the extra space → should be closing
+    test('control A: single-space CLAIM_REQUIRED_CHECKS (no extra space) → closing', async () => {
+      const r = await closingWith(GREEN, { CLAIM_REQUIRED_CHECKS: CONTROL_A });
+      assert.strictEqual(r.out.reason, 'closing');
+      assert.strictEqual(r.out.work, true);
+    });
+
+    // Control B: variable has double-space AND CI checks also have matching double-space names → should be closing
+    test('control B: double-space in both variable AND check names → closing', async () => {
+      const r = await closingWith([
+        { name: 'Tests' + SP + SP + '(ubuntu-latest)', status: 'completed', conclusion: 'success' },
+        { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success' },
+      ], { CLAIM_REQUIRED_CHECKS: 'Tests' + SP + SP + '(ubuntu-latest),Tests (windows-latest)' });
+      assert.strictEqual(r.out.reason, 'closing');
+      assert.strictEqual(r.out.work, true);
+    });
+  });
 });
 
 // ==========================================================================
