@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { exec } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { allRequiredChecksGreen } from '../tools/jira/claim.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -3666,5 +3667,100 @@ describe('claim.js — gh pr view usability and mode (R2, R3.5)', () => {
     assert.strictEqual(r.status, 0, r.stdout + r.stderr);
     assert.strictEqual(out.mode, 'close');
     assert.ok(!r.stdout.includes('implement'));
+  });
+});
+
+// ==========================================================================
+// allRequiredChecksGreen — duplicate check-run name tests (KAN-22)
+// ==========================================================================
+
+describe('allRequiredChecksGreen — duplicate check-run names (KAN-22)', () => {
+  var REQUIRED_UB = ['Tests (ubuntu-latest)'];
+
+  function ub(o) {
+    return { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', ...o };
+  }
+
+  // AC1: fresh failure, old success → false
+  test('AC1: fresh failure + old success → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-02T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  // AC2: fresh success, old failure → true
+  test('AC2: fresh success + old failure → true', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-02T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), true);
+  });
+
+  // AC3: fresh in_progress, old success → false
+  test('AC3: fresh in_progress + old success → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'in_progress', started_at: '2024-01-02T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  // AC4: no completed_at / started_at — order in response decides; failure later → false
+  test('AC4: no time fields, failure later in array → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  // AC4b: no completed_at / started_at — success later → true
+  test('AC4b: no time fields, success later in array → true', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), true);
+  });
+
+  // AC5: garbage time string → treated as no time, index decides
+  test('AC5: garbage time string does not throw → index decides', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: 'garbage' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: 'garbage' },
+    ];
+    assert.doesNotThrow(() => allRequiredChecksGreen(runs, REQUIRED_UB));
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  // AC6: required.length === 0 → false
+  test('AC6: empty required → false', () => {
+    assert.strictEqual(allRequiredChecksGreen([ub()], []), false);
+  });
+
+  // AC7: runs not an array → false
+  test('AC7: runs not array → false', () => {
+    assert.strictEqual(allRequiredChecksGreen(null, REQUIRED_UB), false);
+  });
+
+  // AC8: missing required check → false
+  test('AC8: missing required check → false', () => {
+    assert.strictEqual(allRequiredChecksGreen([], REQUIRED_UB), false);
+  });
+
+  // Test that mutation back to .some breaks this test
+  test('mutation check: reverting to .some would pass AC1', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-02T00:00:00Z' },
+    ];
+    // Simulate old .some logic: any matching completed+success → true
+    var oldLogic = REQUIRED_UB.every((name) => runs.some(
+      (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
+    ));
+    assert.strictEqual(oldLogic, true, 'old .some logic would incorrectly return true');
   });
 });

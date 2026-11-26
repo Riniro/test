@@ -131,14 +131,93 @@ export function requiredChecks(env) {
 }
 
 /**
+ * Parse a single time string; return a numeric timestamp or NaN.
+ */
+function parseTime(value) {
+  if (!value || typeof value !== 'string') return NaN;
+  var t = Date.parse(value);
+  return isNaN(t) ? NaN : t;
+}
+
+/**
+ * Return the freshness key for a single check-run record.
+ *
+ * Order (descending = freshest): completed_at, started_at, answer index.
+ * NaN values are treated as "no time" and lose to a record that has time.
+ * When both have time or both lack time, index decides (higher index = fresher).
+ */
+function freshnessKey(run, idx) {
+  var ct = parseTime(run && run.completed_at);
+  var st = parseTime(run && run.started_at);
+  return { ct: ct, st: st, idx: idx };
+}
+
+/**
+ * Compare two freshness keys: return positive if a is fresher, negative if b,
+ * 0 if equal. Rules:
+ * 1. If both have completed_at, compare by it.
+ * 2. If only one has completed_at, that one is fresher.
+ * 3. If tied (or both missing) on completed_at, compare by started_at.
+ * 4. If tied (or both missing) on started_at, higher index wins.
+ */
+function isFresher(a, b) {
+  // completed_at
+  if (!isNaN(a.ct) && !isNaN(b.ct)) { if (a.ct !== b.ct) return a.ct - b.ct; }
+  else if (!isNaN(a.ct)) return 1;
+  else if (!isNaN(b.ct)) return -1;
+  // started_at
+  if (!isNaN(a.st) && !isNaN(b.st)) { if (a.st !== b.st) return a.st - b.st; }
+  else if (!isNaN(a.st)) return 1;
+  else if (!isNaN(b.st)) return -1;
+  // index
+  return a.idx - b.idx;
+}
+
+/**
  * True only when EVERY required check is present, completed and successful.
- * Missing, queued, in_progress and any non-success conclusion are not green.
+ *
+ * For each required name: among completed records, pick the freshest.
+ * If the freshest completed record is not success → false.
+ * If a more recent record exists but is not yet completed (in_progress / queued),
+ * the check is NOT green (the stale completed success does not count).
  */
 export function allRequiredChecksGreen(runs, required) {
   if (!Array.isArray(runs) || required.length === 0) return false;
-  return required.every((name) => runs.some(
-    (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
-  ));
+  for (var i = 0; i < required.length; i++) {
+    var name = required[i];
+    var collected = [];
+    for (var j = 0; j < runs.length; j++) {
+      var r = runs[j];
+      if (r && r.name === name) collected.push({ run: r, idx: j });
+    }
+    if (collected.length === 0) return false;
+    // Filter to completed records
+    var completed = [];
+    var freshestIncomplete = null;
+    var freshestIncompleteIdx = -1;
+    for (var k = 0; k < collected.length; k++) {
+      var c = collected[k];
+      if (c.run.status === 'completed') {
+        completed.push(c);
+      } else {
+        // Track the freshest non-completed record
+        if (freshestIncomplete === null || isFresher(c, freshestIncomplete) > 0) {
+          freshestIncomplete = c;
+          freshestIncompleteIdx = c.idx;
+        }
+      }
+    }
+    if (completed.length === 0) return false;
+    // Pick the freshest completed
+    var best = completed[0];
+    for (var m = 1; m < completed.length; m++) {
+      if (isFresher(completed[m], best) > 0) best = completed[m];
+    }
+    // If a more recent non-completed record exists, the check is not green
+    if (freshestIncomplete && isFresher(freshestIncomplete, best) > 0) return false;
+    if (best.run.conclusion !== 'success') return false;
+  }
+  return true;
 }
 
 /**
