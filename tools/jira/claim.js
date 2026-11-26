@@ -131,14 +131,68 @@ export function requiredChecks(env) {
 }
 
 /**
+ * Parse a single time string; return a numeric timestamp or NaN.
+ */
+function parseTime(value) {
+  if (!value || typeof value !== 'string') return NaN;
+  const t = Date.parse(value);
+  return isNaN(t) ? NaN : t;
+}
+
+/**
+ * Compare two check-run records for freshness: return positive if a is fresher,
+ * negative if b, 0 if equal.
+ *
+ * 1. If both have effective time (completed_at ?? started_at) and they differ → time decides.
+ * 2. Otherwise (at least one lacks time, or times are equal) → index decides.
+ */
+function isFresher(a, b) {
+  const aTime = parseTime(a.run.completed_at ?? a.run.started_at);
+  const bTime = parseTime(b.run.completed_at ?? b.run.started_at);
+  if (!isNaN(aTime) && !isNaN(bTime) && aTime !== bTime) {
+    return aTime - bTime;
+  }
+  return a.idx - b.idx;
+}
+
+/**
  * True only when EVERY required check is present, completed and successful.
- * Missing, queued, in_progress and any non-success conclusion are not green.
+ *
+ * For each required name: among completed records, pick the freshest.
+ * If the freshest completed record is not success → false.
+ * If a more recent record exists but is not yet completed (in_progress / queued),
+ * the check is NOT green (the stale completed success does not count).
  */
 export function allRequiredChecksGreen(runs, required) {
   if (!Array.isArray(runs) || required.length === 0) return false;
-  return required.every((name) => runs.some(
-    (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
-  ));
+  for (const name of required) {
+    const collected = [];
+    for (let j = 0; j < runs.length; j++) {
+      const r = runs[j];
+      if (r && r.name === name) collected.push({ run: r, idx: j });
+    }
+    if (collected.length === 0) return false;
+
+    let bestCompleted = null;
+    let freshestIncomplete = null;
+
+    for (const entry of collected) {
+      if (entry.run.status === 'completed') {
+        if (bestCompleted === null || isFresher(entry, bestCompleted) > 0) {
+          bestCompleted = entry;
+        }
+      } else {
+        if (freshestIncomplete === null || isFresher(entry, freshestIncomplete) > 0) {
+          freshestIncomplete = entry;
+        }
+      }
+    }
+
+    if (bestCompleted === null) return false;
+    if (freshestIncomplete && isFresher(freshestIncomplete, bestCompleted) > 0) return false;
+    if (bestCompleted.run.conclusion !== 'success') return false;
+  }
+  return true;
 }
 
 /**

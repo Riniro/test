@@ -1257,6 +1257,45 @@ describe('CLI process tests', () => {
       cleanup(gh.dir);
     }
   });
+
+  // KAN-22: fresh failure + old success does not give `closing`
+  test('KAN-22: fresh failure + old success does not give closing', async () => {
+    const ghStubDir = mkTempDir('pick-kan22');
+    const stubPath = path.join(ghStubDir, 'gh.js');
+    // check-runs: two entries with same name; fresher one is failure
+    fs.writeFileSync(stubPath, [
+      'const a=process.argv.slice(2).join(" ");',
+      'if (a.includes("pr list")) {',
+      '  process.stdout.write(JSON.stringify([{"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}}])+ "\\n");',
+      '} else if (a.includes("pr view")) {',
+      '  process.stdout.write(JSON.stringify({"number":42,"state":"MERGED","title":"[KAN-14] Add pickup check","url":"https://gh.test/Riniro/test/pull/42","baseRefName":"master","headRepository":{"nameWithOwner":"Riniro/test"},"mergedAt":"2024-01-01T00:00:00Z","mergeCommit":{"oid":"abc123"}})+ "\\n");',
+      '} else if (a.includes("check-runs")) {',
+      '  process.stdout.write(JSON.stringify({ total_count: 2, check_runs: [',
+      '    {"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"success","completed_at":"2024-01-01T00:00:00Z"},',
+      '    {"name":"Tests (ubuntu-latest)","status":"completed","conclusion":"failure","completed_at":"2024-01-02T00:00:00Z"},',
+      '    {"name":"Tests (windows-latest)","status":"completed","conclusion":"success","completed_at":"2024-01-02T00:00:00Z"}',
+      '  ]})+ "\\n");',
+      '} else {',
+      '  process.stdout.write("[]"+ "\\n");',
+      '}',
+      'process.exit(0);',
+    ].join('\n'));
+
+    const result = await runPickupCli(stubPath, (req, res) => {
+      if (noInReviewFixture(req, res)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        issues: [{ key: 'KAN-14', fields: { summary: 'Add pickup check', labels: ['project-test', 'ai-awaiting-merge'] } }],
+      }));
+    });
+
+    assert.strictEqual(result.status, 0); // work=true → closing_ci_failed (not `closing`)
+    const out = JSON.parse(result.stdout);
+    assert.strictEqual(out.work, true);
+    assert.strictEqual(out.reason, 'closing_ci_failed');
+    assert.notStrictEqual(out.reason, 'closing');
+    cleanup(ghStubDir);
+  });
 });
 
 // ==========================================================================
