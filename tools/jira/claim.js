@@ -143,19 +143,14 @@ function parseTime(value) {
  * Compare two check-run records for freshness: return positive if a is fresher,
  * negative if b, 0 if equal.
  *
- * Effective time = completed_at ?? started_at (both parsed, NaN = no time).
- * 1. Compare effective time.
- * 2. If either side lacks effective time, or times are equal, index decides.
+ * 1. If both have effective time (completed_at ?? started_at) and they differ → time decides.
+ * 2. Otherwise (at least one lacks time, or times are equal) → index decides.
  */
 function isFresher(a, b) {
   const aTime = parseTime(a.run.completed_at ?? a.run.started_at);
   const bTime = parseTime(b.run.completed_at ?? b.run.started_at);
-  if (!isNaN(aTime) && !isNaN(bTime)) {
-    if (aTime !== bTime) return aTime - bTime;
-  } else if (!isNaN(aTime)) {
-    return 1;
-  } else if (!isNaN(bTime)) {
-    return -1;
+  if (!isNaN(aTime) && !isNaN(bTime) && aTime !== bTime) {
+    return aTime - bTime;
   }
   return a.idx - b.idx;
 }

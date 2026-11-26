@@ -3751,19 +3751,6 @@ describe('allRequiredChecksGreen — duplicate check-run names (KAN-22)', () => 
     assert.strictEqual(allRequiredChecksGreen([], REQUIRED_UB), false);
   });
 
-  // Test that mutation back to .some breaks this test
-  test('mutation check: reverting to .some would pass AC1', () => {
-    var runs = [
-      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
-      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-02T00:00:00Z' },
-    ];
-    // Simulate old .some logic: any matching completed+success → true
-    var oldLogic = REQUIRED_UB.every((name) => runs.some(
-      (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
-    ));
-    assert.strictEqual(oldLogic, true, 'old .some logic would incorrectly return true');
-  });
-
   // KAN-22 round 2: array order OPPOSITE to timestamp order — time must win
   // (a) fresh failure first in array (earlier index), old success second → false
   test('T1: fresh failure (index 0, later time), old success (index 1, earlier time) → false', () => {
@@ -3809,18 +3796,77 @@ describe('allRequiredChecksGreen — duplicate check-run names (KAN-22)', () => 
     assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), true);
   });
 
-  // Mutation-catch: stripping time comparison from isFresher should make T1-T5 fail
-  test('mutation check: time-only ordering makes T1 pass while .some would fail T1', () => {
+  // Same completed_at on both → index decides
+  test('T6: identical completed_at, failure later → false', () => {
     var runs = [
-      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2026-01-02T00:00:00Z' },
-      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2026-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-01T00:00:00Z' },
     ];
-    // Current: fresh failure → false (correct)
     assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
-    // Old .some: any success → true (wrong)
-    var oldLogic = REQUIRED_UB.every((name) => runs.some(
-      (r) => r && r.name === name && r.status === 'completed' && r.conclusion === 'success'
-    ));
-    assert.strictEqual(oldLogic, true, 'old .some logic would incorrectly return true for T1');
+  });
+
+  test('T7: identical completed_at, success later → true', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), true);
+  });
+
+  // Mixed timed / untimed
+  test('T8: [timed success, untimed failure] → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  test('T9: [timed success, untimed queued] → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'queued' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  test('T10: [untimed failure, timed success later by index] → true', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), true);
+  });
+
+  // null/undefined/strings in runs array are ignored
+  test('T11: null/undefined/string elements in runs → ignored', () => {
+    var runs = [
+      null,
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+      undefined,
+      'garbage',
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
+  });
+
+  // Multiple required names: one fresh failure, another all green → false
+  test('T12: multiple required names, one fresh fail → false', () => {
+    var runs = [
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (ubuntu-latest)', status: 'completed', conclusion: 'failure', completed_at: '2024-01-02T00:00:00Z' },
+      { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-01T00:00:00Z' },
+      { name: 'Tests (windows-latest)', status: 'completed', conclusion: 'success', completed_at: '2024-01-02T00:00:00Z' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, ['Tests (ubuntu-latest)', 'Tests (windows-latest)']), false);
+  });
+
+  // Case mismatch: a record with different case is not counted
+  test('T13: different case name does not match → false', () => {
+    var runs = [
+      { name: 'tests (ubuntu-latest)', status: 'completed', conclusion: 'success' },
+      { name: 'TESTS (UBUNTU-LATEST)', status: 'completed', conclusion: 'success' },
+    ];
+    assert.strictEqual(allRequiredChecksGreen(runs, REQUIRED_UB), false);
   });
 });
